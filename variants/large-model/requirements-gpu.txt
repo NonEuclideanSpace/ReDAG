@@ -1,0 +1,7 @@
+transformers @ https://github.com/huggingface/transformers/archive/ddb849abe009d1089e6c691bfc897f27211c663c.zip
+peft @ https://github.com/huggingface/peft/archive/a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e.zip
+diffusers @ https://github.com/huggingface/diffusers/archive/275869dcae4ebcfee6a80253fdabc56033335020.zip
+bitsandbytes==0.50.2
+accelerate>=1.10
+sentencepiece>=0.2
+protobuf>=5

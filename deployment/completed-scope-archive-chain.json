@@ -1,0 +1,15 @@
+{
+  "at": 1793175881.0117528,
+  "status": "queued",
+  "jobs": [
+    "archive-formal-sft-complete",
+    "archive-full-rl-complete",
+    "archive-formal-agent_rl-complete",
+    "archive-formal-joint_rl-complete",
+    "archive-formal-base-complete",
+    "archive-final-project-delta"
+  ],
+  "reclamation_success_required": "deployment/reclamation-result-20261028T0823Z.json",
+  "existing_jobs_modified": false,
+  "requires_final_followup_for_analysis_and_receipts": true
+}

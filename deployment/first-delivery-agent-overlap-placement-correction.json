@@ -1,0 +1,20 @@
+{
+  "status": "applied_before_start",
+  "job": "development64-controller-agent_rl-024-seed73",
+  "at": 1793181446.1341383,
+  "before": {
+    "gpus": [
+      0
+    ],
+    "device": "cuda:0",
+    "exclusive_group": "renderer-evaluation-gpu0"
+  },
+  "after": {
+    "gpus": [
+      1
+    ],
+    "device": "cuda:1",
+    "exclusive_group": "renderer-evaluation-gpu1"
+  },
+  "reason": "Match the dynamic GPU1 overlap guard and available GPU1 memory"
+}

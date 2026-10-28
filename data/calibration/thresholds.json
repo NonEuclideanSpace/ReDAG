@@ -1,0 +1,53 @@
+{
+  "semantic": {
+    "threshold": 0.5,
+    "confirmed": true,
+    "selection": {
+      "precision": 0.9397089397089398,
+      "recall": 0.6766467065868264,
+      "precision_lower": 0.9147534572756474,
+      "brier": 0.1376506676198944,
+      "ece": 0.09958956134424493,
+      "unknown_rate": 0.058073654390934815,
+      "count": 1412
+    },
+    "confirmation": {
+      "precision": 0.9421052631578948,
+      "recall": 0.613013698630137,
+      "precision_lower": 0.8993192942010715,
+      "brier": 0.15442398929895684,
+      "ece": 0.11596692819870233,
+      "unknown_rate": 0.0738362760834671,
+      "count": 623
+    },
+    "family_counts": {
+      "selection": 400,
+      "confirmation": 200
+    }
+  },
+  "count": {
+    "threshold": 1.0,
+    "confirmed": false,
+    "reason": "insufficient_precision_or_labels"
+  },
+  "inside": {
+    "threshold": 1.0,
+    "confirmed": false,
+    "reason": "insufficient_precision_or_labels"
+  },
+  "below": {
+    "threshold": 1.0,
+    "confirmed": false,
+    "reason": "insufficient_precision_or_labels"
+  },
+  "text": {
+    "threshold": 1.0,
+    "confirmed": false,
+    "reason": "insufficient_precision_or_labels"
+  },
+  "above": {
+    "threshold": 1.0,
+    "confirmed": false,
+    "reason": "insufficient_precision_or_labels"
+  }
+}

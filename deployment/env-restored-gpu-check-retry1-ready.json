@@ -1,0 +1,25 @@
+{
+  "status": "ready",
+  "at": 1793183749.4614415,
+  "reason": "Corrected confirmed GPU-node ordinal assumption and missing host compiler bindings",
+  "device_mapping": [
+    {
+      "nvidia_index": 0,
+      "uuid": "GPU-bccf8b31-70c0-13f0-1ea1-7b0873314b4a",
+      "device_minor": 0,
+      "device_node": "/dev/nvidia0"
+    },
+    {
+      "nvidia_index": 1,
+      "uuid": "GPU-1eadd855-444c-5748-6031-f5dd664c9c50",
+      "device_minor": 4,
+      "device_node": "/dev/nvidia4"
+    }
+  ],
+  "host_toolchain_reused": true,
+  "previous_exit": 1,
+  "previous_evidence": "deployment/env-restored-gpu-check-attempt1",
+  "new_output": "runs/env-restored-gpu-check-retry1",
+  "gpu_verified": false,
+  "checkpoint_recovery_verified": false
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "first_complete_training_chain_delivery_target_v1",
+  "recorded_at": 1793180412.503173,
+  "target_utc": "2026-10-28T12:25:00Z",
+  "target_purpose": "Prioritize the user requested first complete result set within approximately3hours; full1280evaluation goal remains unchanged",
+  "status": "in_progress",
+  "destination": "/Volumes/TOSHIBA EXT/dag-pilot-rental-backup-20261027T130933Z-9769b4",
+  "joint_effective_updates_verified": 32,
+  "requirements": [
+    "Integrated actual source and configuration",
+    "Required base models and archived Linux environment with declared host dependencies",
+    "Final SFT, AgentRL32 and jointRL32 actual weights and recovery state",
+    "Actual isolated GPU restore report matching the final joint archive",
+    "First8families000-007 seed11 four configurations32formal episodes including failures and unknowns",
+    "Selected rendered images, targets, protection masks and full replay dependency closure",
+    "Evidence based paired analysis, AI review labeling and delivery manifest with actual verification receipts"
+  ],
+  "full_formal_evaluation_target": 1280,
+  "first_batch_formal_evaluation_target": 32,
+  "full_goal_complete": false,
+  "remaining_critical_path": [
+    "Joint internal64 evaluation and clean exit",
+    "Final joint export and existing priority receiver",
+    "Actual isolated GPU restore",
+    "Pending firstjoint8formal episodes using existing fixed budget",
+    "Firstbatch export, transfer and last source/report increment"
+  ],
+  "historical_missing_disclosed": true,
+  "deadline_is_target_not_completion_claim": true
+}

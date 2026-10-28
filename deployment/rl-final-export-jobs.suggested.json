@@ -1,0 +1,126 @@
+{
+  "jobs": [
+    {
+      "id": "full-agent-rl32-export",
+      "title": "full-agent-rl32 completed recovery archive (CPU only)",
+      "gpus": [],
+      "priority": 3,
+      "exclusive_group": "completed-rl-cpu-export",
+      "after": [
+        "full-agent-rl32-retain-all-resume"
+      ],
+      "requires": [
+        "runs/full-actor-rl/rl_agent/training_completed.json",
+        "runs/full-actor-rl/sft_reference/references.json",
+        "scripts/export_completed_rl.py"
+      ],
+      "gates": [
+        {
+          "path": "runs/full-actor-rl/rl_agent/training_completed.json",
+          "key": "status",
+          "equals": "completed"
+        },
+        {
+          "path": "runs/full-actor-rl/rl_agent/training_completed.json",
+          "key": "effective_target_met",
+          "equals": true
+        },
+        {
+          "path": "runs/full-actor-rl/rl_agent/training_completed.json",
+          "key": "required_effective_updates",
+          "equals": 32
+        }
+      ],
+      "command": [
+        "/usr/local/miniconda3/envs/py312/bin/python",
+        "-u",
+        "scripts/export_completed_rl.py",
+        "--run",
+        "runs/full-actor-rl",
+        "--mode",
+        "agent",
+        "--expected-effective-updates",
+        "32",
+        "--output",
+        "delivery/priority-checkpoints/full-agent-rl32-complete.tar.gz",
+        "--manifest",
+        "deployment/full-agent-rl32-export.json",
+        "--read-mib-per-second",
+        "16"
+      ],
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "PYTHONPATH": "src"
+      },
+      "pid_file": "deployment/full-agent-rl32-export.pid",
+      "exit_file": "deployment/full-agent-rl32-export.exit.json",
+      "started_file": "deployment/full-agent-rl32-export.started.json",
+      "log_file": "deployment/full-agent-rl32-export.log",
+      "budget": "CPU export only; no training updates; all original checkpoints retained"
+    },
+    {
+      "id": "full-joint-rl32-export",
+      "title": "full-joint-rl32 completed recovery archive (CPU only)",
+      "gpus": [],
+      "priority": 3,
+      "exclusive_group": "completed-rl-cpu-export",
+      "after": [
+        "full-joint-rl32"
+      ],
+      "requires": [
+        "runs/full-actor-rl/rl_joint/training_completed.json",
+        "runs/full-actor-rl/sft_reference/references.json",
+        "scripts/export_completed_rl.py"
+      ],
+      "gates": [
+        {
+          "path": "runs/full-actor-rl/rl_joint/training_completed.json",
+          "key": "status",
+          "equals": "completed"
+        },
+        {
+          "path": "runs/full-actor-rl/rl_joint/training_completed.json",
+          "key": "effective_target_met",
+          "equals": true
+        },
+        {
+          "path": "runs/full-actor-rl/rl_joint/training_completed.json",
+          "key": "required_effective_updates",
+          "equals": 32
+        }
+      ],
+      "command": [
+        "/usr/local/miniconda3/envs/py312/bin/python",
+        "-u",
+        "scripts/export_completed_rl.py",
+        "--run",
+        "runs/full-actor-rl",
+        "--mode",
+        "joint",
+        "--expected-effective-updates",
+        "32",
+        "--output",
+        "delivery/priority-checkpoints/full-joint-rl32-complete.tar.gz",
+        "--manifest",
+        "deployment/full-joint-rl32-export.json",
+        "--read-mib-per-second",
+        "16"
+      ],
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "PYTHONPATH": "src"
+      },
+      "pid_file": "deployment/full-joint-rl32-export.pid",
+      "exit_file": "deployment/full-joint-rl32-export.exit.json",
+      "started_file": "deployment/full-joint-rl32-export.started.json",
+      "log_file": "deployment/full-joint-rl32-export.log",
+      "budget": "CPU export only; no training updates; all original checkpoints retained"
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "device": "cpu",
+  "detection": {
+    "known": true,
+    "detections": [
+      {
+        "box": [
+          0.0004891455173492432,
+          0.3545806109905243,
+          0.46895331144332886,
+          0.973516583442688
+        ],
+        "score": 0.8206207156181335,
+        "label": "cat"
+      },
+      {
+        "box": [
+          0.32887914776802063,
+          0.012949883937835693,
+          0.9500691890716553,
+          0.9982522130012512
+        ],
+        "score": 0.5657826066017151,
+        "label": "dog"
+      }
+    ],
+    "image_id": "artifact:308c6183917c1ab4210d0cd7ba06bc60f9470dfd1991f82676bf4d14c6ac4aca"
+  },
+  "segmentation": {
+    "known": true,
+    "artifact_ids": [
+      "artifact:be68784b667be2ce0932457428c38f5c042be80ba547ba2964464cb021fb38c3"
+    ],
+    "score": 0.9611435532569885
+  },
+  "feature_dimensions": 768,
+  "ocr": {
+    "known": true,
+    "text": "HELLO 123",
+    "words": [
+      {
+        "text": "HELLO",
+        "confidence": 95.976059,
+        "box": [
+          30,
+          39,
+          179,
+          44
+        ]
+      },
+      {
+        "text": "123",
+        "confidence": 95.976059,
+        "box": [
+          237,
+          39,
+          100,
+          44
+        ]
+      }
+    ],
+    "artifact_ids": []
+  }
+}

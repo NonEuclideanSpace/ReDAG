@@ -1,0 +1,22 @@
+{
+  "status": "completed",
+  "started_at": 1793137263.9535801,
+  "source": "/workspace/agentic-image-pilot-small/delivery/unique-models/1793136851694201412-00004-models-judge-8b-nf4.tar.gz",
+  "destination": "/Volumes/TOSHIBA EXT/dag-pilot-rental-backup-20261027T130933Z-9769b4/remote/unique-models-archives/1793136851694201412-00004-models-judge-8b-nf4.tar.gz",
+  "expected_bytes": 2634,
+  "workers": 2,
+  "controls": [
+    "/tmp/dag-pilot-rental-bulk2-ssh",
+    "/tmp/dag-pilot-rental-bulk3-ssh",
+    "/tmp/dag-pilot-rental-backup-ssh"
+  ],
+  "initial_bytes": 0,
+  "updated_at": 1793137336.953503,
+  "received_bytes": 2634,
+  "average_bytes_per_second": 36.08116526463058,
+  "finished_at": 1793137336.9534879,
+  "chunks": 1,
+  "sha256": "c02c3c7332a70c9be9f90a3e2255c9fb7aa42dc18581c87414b7d4234e58f8f3",
+  "source_checksum_verified": true,
+  "verification": "SSH authenticated transfer, exact chunk lengths, stable source size/mtime, exact assembled length; checksum streamed while assembling"
+}

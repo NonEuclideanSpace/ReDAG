@@ -1,0 +1,85 @@
+run_dir: runs/main
+seed: 11
+canvas: [512, 512]
+devices:
+  actor: cuda:0
+  renderer: cuda:1
+  encoders: cuda:2
+  judge: cuda:3
+models:
+  actor: Qwen/Qwen3.8-27B
+  actor_revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+  actor_nf4: models/actor-nf4
+  renderer: black-forest-labs/FLUX.2-klein-base-9B
+  renderer_revision: 32773329fbe7e81a90ef971740e8ba4b0364ecf3
+  judge: Qwen/Qwen3-VL-32B-Instruct
+  judge_revision: 1e6810acf5d8ebd189b4e75590877b64358e454c
+  judge_nf4: models/judge-nf4
+  actor_policy: null
+  actor_reference: null
+  renderer_policy: null
+  renderer_reference: null
+actor:
+  max_input_tokens: 6144
+  max_new_tokens: 1024
+  max_images: 4
+  temperature: 1.0
+  head_chunk_size: 32
+renderer:
+  steps: 50
+  eta: 0.3
+  cfg_scale: 4.0
+  attention_backend: _native_efficient
+  replay_strata: 4
+  saved_tensor_offload: false
+episode:
+  max_actions: 10
+  max_renders: 3
+  max_inspects: 2
+  max_reads: 2
+judge:
+  calibration: data/calibration/thresholds.json
+  max_input_tokens: 8192
+  threshold: 0.8
+  tool_url: http://127.0.0.1:8091
+  timeout: 300
+sft:
+  actor_batch: 20
+  renderer_batch: 12
+  phase_counts: [5, 7, 5, 3]
+  phase_weights: [0.25, 0.35, 0.25, 0.15]
+  learning_rate: 0.00005
+  weight_decay: 0.01
+  text_dropout: 0.1
+  protocol_updates: 200
+  renderer_updates: 800
+  actor_updates: 800
+  refresh_updates: 100
+rl:
+  tasks: 6
+  roots: 2
+  suffixes: 2
+  actor_learning_rate: 0.000005
+  renderer_learning_rate: 0.00003
+  renderer_pilot_rates: [0.00003, 0.0001]
+  beta_actor: 0.02
+  beta_renderer: 0.01
+  epsilon: 0.00000001
+  max_grad_norm: 1.0
+  agent_rounds: 100
+  joint_rounds: 400
+  pilot_rounds: 10
+  warmup_rounds: 10
+  evaluate_every: 25
+  development_tasks: 64
+  probe_actor_kl: 0.1
+  probe_renderer_kl: 0.01
+data:
+  paired_audit: data/aligned/audit/result.json
+  public_tasks: data/public/tasks.jsonl
+  private_tasks: data/private/evaluations.jsonl
+  actor_records: data/sft/actor.jsonl
+  renderer_records: data/sft/renderer.jsonl
+  development_tasks: data/public/development.jsonl
+  development_private: data/private/development.jsonl
+  artifacts: data/artifacts

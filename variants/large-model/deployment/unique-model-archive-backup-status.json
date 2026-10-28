@@ -1,0 +1,239 @@
+{
+  "status": "snapshot_archives_downloaded",
+  "pid": 64354,
+  "started_at": 1793136851.693439,
+  "destination": "/Volumes/TOSHIBA EXT/dag-pilot-rental-backup-20261027T130933Z-9769b4/remote/unique-models-archives",
+  "remote": "/workspace/agentic-image-pilot-small/delivery/unique-models",
+  "transfer_reports": "/Users/euclid/Documents/workspace/labs/dag- implementation/deployment/unique-model-archive-backup-transfers",
+  "completed": {
+    "1793136851694201412-00001-models-actor-4b-nf4.tar.gz": {
+      "archive": "1793136851694201412-00001-models-actor-4b-nf4.tar.gz",
+      "bytes": 3952,
+      "sha256": "3d2c154fba0b3d7ed0f04272564a2ad74292e6a5fb95c2ae3452c15e556852c2",
+      "verified_at": 1793136948.174792
+    },
+    "1793136851694201412-00004-models-judge-8b-nf4.tar.gz": {
+      "archive": "1793136851694201412-00004-models-judge-8b-nf4.tar.gz",
+      "bytes": 2634,
+      "sha256": "c02c3c7332a70c9be9f90a3e2255c9fb7aa42dc18581c87414b7d4234e58f8f3",
+      "verified_at": 1793137336.961549
+    },
+    "1793136851694201412-00003-models-actor-4b-nf4.tar.gz": {
+      "archive": "1793136851694201412-00003-models-actor-4b-nf4.tar.gz",
+      "bytes": 4705648,
+      "sha256": "f1c4066ba41c3f1f8d84bf8955585e75ad50c2d42355ae13eb1fb1665e18dfb4",
+      "verified_at": 1793137375.7084281
+    },
+    "1793136851694201412-00006-models-judge-8b-nf4.tar.gz": {
+      "archive": "1793136851694201412-00006-models-judge-8b-nf4.tar.gz",
+      "bytes": 1991285202,
+      "sha256": "7864d0137472f5720c8711b96260f09a6ac244401a42b781fe766c1bad9274fb",
+      "verified_at": 1793141017.7503328
+    },
+    "1793136851694201412-00007-models-judge-8b-nf4.tar.gz": {
+      "archive": "1793136851694201412-00007-models-judge-8b-nf4.tar.gz",
+      "bytes": 2542129,
+      "sha256": "2ee5b58bbfdf1b12a1807f0f25dd9909ffab28ad3951f0986b6c4fb2205f9da8",
+      "verified_at": 1793141027.0501409
+    },
+    "1793136851694201412-00008-models-tools.tar.gz": {
+      "archive": "1793136851694201412-00008-models-tools.tar.gz",
+      "bytes": 677,
+      "sha256": "fe6ec2e5b8efa333ff0f1f603cb8204040071e1c76755b3c1f0b34b70be2fc5a",
+      "verified_at": 1793141056.965972
+    },
+    "1793136851694201412-00009-models-tools.tar.gz": {
+      "archive": "1793136851694201412-00009-models-tools.tar.gz",
+      "bytes": 409222048,
+      "sha256": "15aeb00c52984ccd5ebf34b1df1735f7907e2823a975e53df126edd8854800b3",
+      "verified_at": 1793141720.9422238
+    },
+    "1793136851694201412-00010-models-tools.tar.gz": {
+      "archive": "1793136851694201412-00010-models-tools.tar.gz",
+      "bytes": 338341,
+      "sha256": "ba6075229bcf8036358711165ce037b88dd771f739108aab77e74e090980508d",
+      "verified_at": 1793141725.876744
+    },
+    "1793136851694201412-00011-models-tools.tar.gz": {
+      "archive": "1793136851694201412-00011-models-tools.tar.gz",
+      "bytes": 322452213,
+      "sha256": "f177ca58ea78e4fce4642dcd090771d3dc3fd273587f0cf218fdce27d4121260",
+      "verified_at": 1793142031.3380868
+    },
+    "1793136851694201412-00012-models-tools.tar.gz": {
+      "archive": "1793136851694201412-00012-models-tools.tar.gz",
+      "bytes": 2060681,
+      "sha256": "3d731e86b1d8eacfedb105e91ec9532c5c408cbc22f4600a025d613e50e28937",
+      "verified_at": 1793142050.5509279
+    },
+    "1793136851694201412-00013-models-tools.tar.gz": {
+      "archive": "1793136851694201412-00013-models-tools.tar.gz",
+      "bytes": 644410616,
+      "sha256": "83030e6e3b3ce86ef0a30254a017360c232baa2e754b469b83917fcb3c8c9064",
+      "verified_at": 1793143140.935147
+    },
+    "1793136851694201412-00014-models-tools.tar.gz": {
+      "archive": "1793136851694201412-00014-models-tools.tar.gz",
+      "bytes": 171849608,
+      "sha256": "c88e82267a054650d8e7d22cd9e98b95c64bc80a472669905a8bf022c6ef8286",
+      "verified_at": 1793143501.627347
+    },
+    "1793136851694201412-00002-models-actor-4b-nf4.tar.gz": {
+      "archive": "1793136851694201412-00002-models-actor-4b-nf4.tar.gz",
+      "bytes": 3351424733,
+      "sha256": "57615c46409787965a80ca3214dbd86bff62599a023b5d5b5c1c117a543053d0",
+      "verified_at": 1793144074.913763
+    },
+    "1793136851694201412-00005-models-judge-8b-nf4.tar.gz": {
+      "archive": "1793136851694201412-00005-models-judge-8b-nf4.tar.gz",
+      "bytes": 4393059972,
+      "sha256": "b6c5674c73a465692570eb0448b948bccdf3ef018725b3548006d2e53b723858",
+      "verified_at": 1793144098.5091488
+    }
+  },
+  "failures": [
+    {
+      "archive": "1793136851694201412-00006-models-judge-8b-nf4.tar.gz",
+      "at": 1793140935.904255,
+      "error": "Command '['/opt/homebrew/opt/python@3.14/bin/python3.14', '-u', '/Users/euclid/Documents/workspace/labs/dag- implementation/pilot-small/scripts/download_rental_chunks.py', '--source', '/workspace/agentic-image-pilot-small/delivery/unique-models/1793136851694201412-00006-models-judge-8b-nf4.tar.gz', '--destination', '/Volumes/TOSHIBA EXT/dag-pilot-rental-backup-20261027T130933Z-9769b4/remote/unique-models-archives/1793136851694201412-00006-models-judge-8b-nf4.tar.gz', '--bytes', '1991285202', '--mtime', '1793137909', '--sha256', '7864d0137472f5720c8711b96260f09a6ac244401a42b781fe766c1bad9274fb', '--workers', '2', '--status', '/Users/euclid/Documents/workspace/labs/dag- implementation/deployment/unique-model-archive-backup-transfers/1793136851694201412-00006-models-judge-8b-nf4.tar.gz.json', '--control', '/tmp/dag-pilot-rental-bulk2-ssh', '--control', '/tmp/dag-pilot-rental-bulk3-ssh', '--control', '/tmp/dag-pilot-rental-backup-ssh']' returned non-zero exit status 1."
+    },
+    {
+      "archive": "1793136851694201412-00002-models-actor-4b-nf4.tar.gz",
+      "at": 1793143819.9599261,
+      "error": "Command '['/opt/homebrew/opt/python@3.14/bin/python3.14', '-u', '/Users/euclid/Documents/workspace/labs/dag- implementation/pilot-small/scripts/download_rental_chunks.py', '--source', '/workspace/agentic-image-pilot-small/delivery/unique-models/1793136851694201412-00002-models-actor-4b-nf4.tar.gz', '--destination', '/Volumes/TOSHIBA EXT/dag-pilot-rental-backup-20261027T130933Z-9769b4/remote/unique-models-archives/1793136851694201412-00002-models-actor-4b-nf4.tar.gz', '--bytes', '3351424733', '--mtime', '1793137213', '--sha256', '57615c46409787965a80ca3214dbd86bff62599a023b5d5b5c1c117a543053d0', '--workers', '2', '--status', '/Users/euclid/Documents/workspace/labs/dag- implementation/deployment/unique-model-archive-backup-transfers/1793136851694201412-00002-models-actor-4b-nf4.tar.gz.json', '--control', '/tmp/dag-pilot-rental-bulk2-ssh', '--control', '/tmp/dag-pilot-rental-bulk3-ssh', '--control', '/tmp/dag-pilot-rental-backup-ssh']' returned non-zero exit status 1."
+    },
+    {
+      "archive": "1793136851694201412-00005-models-judge-8b-nf4.tar.gz",
+      "at": 1793143819.9599721,
+      "error": "Command '['/opt/homebrew/opt/python@3.14/bin/python3.14', '-u', '/Users/euclid/Documents/workspace/labs/dag- implementation/pilot-small/scripts/download_rental_chunks.py', '--source', '/workspace/agentic-image-pilot-small/delivery/unique-models/1793136851694201412-00005-models-judge-8b-nf4.tar.gz', '--destination', '/Volumes/TOSHIBA EXT/dag-pilot-rental-backup-20261027T130933Z-9769b4/remote/unique-models-archives/1793136851694201412-00005-models-judge-8b-nf4.tar.gz', '--bytes', '4393059972', '--mtime', '1793137693', '--sha256', 'b6c5674c73a465692570eb0448b948bccdf3ef018725b3548006d2e53b723858', '--workers', '2', '--status', '/Users/euclid/Documents/workspace/labs/dag- implementation/deployment/unique-model-archive-backup-transfers/1793136851694201412-00005-models-judge-8b-nf4.tar.gz.json', '--control', '/tmp/dag-pilot-rental-bulk2-ssh', '--control', '/tmp/dag-pilot-rental-bulk3-ssh', '--control', '/tmp/dag-pilot-rental-backup-ssh']' returned non-zero exit status 1."
+    }
+  ],
+  "active": [],
+  "parallel_archives": 3,
+  "full_delivery_complete": false,
+  "remote_snapshot": {
+    "status": "snapshot_catalog_caught_up",
+    "archives": [
+      {
+        "archive": "1793136851694201412-00001-models-actor-4b-nf4.tar.gz",
+        "archive_bytes": 3952,
+        "sha256": "3d2c154fba0b3d7ed0f04272564a2ad74292e6a5fb95c2ae3452c15e556852c2",
+        "group": "models/actor-4b-nf4",
+        "source_bytes": 11528,
+        "completed_at": 1793136851.7055616
+      },
+      {
+        "archive": "1793136851694201412-00002-models-actor-4b-nf4.tar.gz",
+        "archive_bytes": 3351424733,
+        "sha256": "57615c46409787965a80ca3214dbd86bff62599a023b5d5b5c1c117a543053d0",
+        "group": "models/actor-4b-nf4",
+        "source_bytes": 3787847513,
+        "completed_at": 1793137215.061831
+      },
+      {
+        "archive": "1793136851694201412-00003-models-actor-4b-nf4.tar.gz",
+        "archive_bytes": 4705648,
+        "sha256": "f1c4066ba41c3f1f8d84bf8955585e75ad50c2d42355ae13eb1fb1665e18dfb4",
+        "group": "models/actor-4b-nf4",
+        "source_bytes": 19991702,
+        "completed_at": 1793137216.5845742
+      },
+      {
+        "archive": "1793136851694201412-00004-models-judge-8b-nf4.tar.gz",
+        "archive_bytes": 2634,
+        "sha256": "c02c3c7332a70c9be9f90a3e2255c9fb7aa42dc18581c87414b7d4234e58f8f3",
+        "group": "models/judge-8b-nf4",
+        "source_bytes": 7888,
+        "completed_at": 1793137216.5895748
+      },
+      {
+        "archive": "1793136851694201412-00005-models-judge-8b-nf4.tar.gz",
+        "archive_bytes": 4393059972,
+        "sha256": "b6c5674c73a465692570eb0448b948bccdf3ef018725b3548006d2e53b723858",
+        "group": "models/judge-8b-nf4",
+        "source_bytes": 4978393565,
+        "completed_at": 1793137694.3183143
+      },
+      {
+        "archive": "1793136851694201412-00006-models-judge-8b-nf4.tar.gz",
+        "archive_bytes": 1991285202,
+        "sha256": "7864d0137472f5720c8711b96260f09a6ac244401a42b781fe766c1bad9274fb",
+        "group": "models/judge-8b-nf4",
+        "source_bytes": 2248004502,
+        "completed_at": 1793137911.1730719
+      },
+      {
+        "archive": "1793136851694201412-00007-models-judge-8b-nf4.tar.gz",
+        "archive_bytes": 2542129,
+        "sha256": "2ee5b58bbfdf1b12a1807f0f25dd9909ffab28ad3951f0986b6c4fb2205f9da8",
+        "group": "models/judge-8b-nf4",
+        "source_bytes": 11633196,
+        "completed_at": 1793137912.0836172
+      },
+      {
+        "archive": "1793136851694201412-00008-models-tools.tar.gz",
+        "archive_bytes": 677,
+        "sha256": "fe6ec2e5b8efa333ff0f1f603cb8204040071e1c76755b3c1f0b34b70be2fc5a",
+        "group": "models/tools",
+        "source_bytes": 570,
+        "completed_at": 1793137912.0883896
+      },
+      {
+        "archive": "1793136851694201412-00009-models-tools.tar.gz",
+        "archive_bytes": 409222048,
+        "sha256": "15aeb00c52984ccd5ebf34b1df1735f7907e2823a975e53df126edd8854800b3",
+        "group": "models/tools",
+        "source_bytes": 440449768,
+        "completed_at": 1793137956.4251819
+      },
+      {
+        "archive": "1793136851694201412-00010-models-tools.tar.gz",
+        "archive_bytes": 338341,
+        "sha256": "ba6075229bcf8036358711165ce037b88dd771f739108aab77e74e090980508d",
+        "group": "models/tools",
+        "source_bytes": 697618,
+        "completed_at": 1793137956.487618
+      },
+      {
+        "archive": "1793136851694201412-00011-models-tools.tar.gz",
+        "archive_bytes": 322452213,
+        "sha256": "f177ca58ea78e4fce4642dcd090771d3dc3fd273587f0cf218fdce27d4121260",
+        "group": "models/tools",
+        "source_bytes": 346378731,
+        "completed_at": 1793137991.5353055
+      },
+      {
+        "archive": "1793136851694201412-00012-models-tools.tar.gz",
+        "archive_bytes": 2060681,
+        "sha256": "3d731e86b1d8eacfedb105e91ec9532c5c408cbc22f4600a025d613e50e28937",
+        "group": "models/tools",
+        "source_bytes": 4114144,
+        "completed_at": 1793137991.8877907
+      },
+      {
+        "archive": "1793136851694201412-00013-models-tools.tar.gz",
+        "archive_bytes": 644410616,
+        "sha256": "83030e6e3b3ce86ef0a30254a017360c232baa2e754b469b83917fcb3c8c9064",
+        "group": "models/tools",
+        "source_bytes": 693997677,
+        "completed_at": 1793138061.7883487
+      },
+      {
+        "archive": "1793136851694201412-00014-models-tools.tar.gz",
+        "archive_bytes": 171849608,
+        "sha256": "c88e82267a054650d8e7d22cd9e98b95c64bc80a472669905a8bf022c6ef8286",
+        "group": "models/tools",
+        "source_bytes": 184416285,
+        "completed_at": 1793138080.49247
+      }
+    ],
+    "errors": [],
+    "pending_changed_or_new_paths": [],
+    "updated_at": 1793138080.4989173
+  },
+  "known_archive_bytes": 11293358454,
+  "verified_bytes": 11293358454,
+  "verified_archives": 14,
+  "updated_at": 1793144105.172083,
+  "finished_at": 1793144105.172083
+}

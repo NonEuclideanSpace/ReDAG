@@ -1,0 +1,121 @@
+run_dir: runs/pilot-small
+seed: 73
+canvas:
+- 512
+- 512
+devices:
+  actor: cuda:0
+  renderer: cuda:1
+  encoders: cuda:0
+  judge: cuda:0
+models:
+  actor: Qwen/Qwen3.5-4B
+  actor_revision: 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  actor_nf4: models/actor-4b-nf4
+  renderer: /workspace/agentic-image-pilot-small/models/renderer/a3b4f4849157f664bdbc776fd7453c2783562f4d
+  renderer_revision: a3b4f4849157f664bdbc776fd7453c2783562f4d
+  judge: Qwen/Qwen3-VL-8B-Instruct
+  judge_revision: 0c351dd01ed87e9c1b53cbc748cba10e6187ff3b
+  judge_nf4: models/judge-8b-nf4
+  actor_policy: null
+  actor_reference: null
+  renderer_policy: null
+  renderer_reference: null
+  actor_source: /workspace/agentic-image-pilot-small/models/actor/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  renderer_profile: klein-base-4b
+  judge_source: /workspace/agentic-image-pilot-small/models/judge/0c351dd01ed87e9c1b53cbc748cba10e6187ff3b
+actor:
+  max_input_tokens: 6144
+  max_new_tokens: 1024
+  max_images: 4
+  temperature: 1.0
+  head_chunk_size: 32
+renderer:
+  steps: 50
+  eta: 0.3
+  cfg_scale: 4.0
+  attention_backend: _native_efficient
+  replay_strata: 4
+  saved_tensor_offload: false
+episode:
+  max_actions: 10
+  max_renders: 3
+  max_inspects: 2
+  max_reads: 2
+judge:
+  calibration: data/calibration/thresholds.json
+  max_input_tokens: 8192
+  threshold: 0.8
+  tool_url: http://127.0.0.1:8091
+  timeout: 300
+sft:
+  actor_batch: 20
+  renderer_batch: 12
+  phase_counts:
+  - 5
+  - 7
+  - 5
+  - 3
+  phase_weights:
+  - 0.25
+  - 0.35
+  - 0.25
+  - 0.15
+  learning_rate: 5.0e-05
+  weight_decay: 0.01
+  text_dropout: 0.1
+  protocol_updates: 20
+  renderer_updates: 40
+  actor_updates: 40
+  refresh_updates: 10
+rl:
+  tasks: 2
+  roots: 2
+  suffixes: 2
+  actor_learning_rate: 5.0e-06
+  renderer_learning_rate: 3.0e-05
+  renderer_pilot_rates:
+  - 3.0e-05
+  - 0.0001
+  beta_actor: 0.02
+  beta_renderer: 0.01
+  epsilon: 1.0e-08
+  max_grad_norm: 1.0
+  agent_rounds: 3
+  joint_rounds: 5
+  pilot_rounds: 2
+  warmup_rounds: 1
+  evaluate_every: 1
+  development_tasks: 64
+  probe_actor_kl: 0.1
+  probe_renderer_kl: 0.01
+data:
+  paired_audit: data/aligned/audit/result.json
+  public_tasks: data/public/tasks.jsonl
+  private_tasks: data/private/evaluations.jsonl
+  actor_records: data/sft/actor.jsonl
+  renderer_records: data/sft/renderer.jsonl
+  development_tasks: data/public/development.jsonl
+  development_private: data/private/development.jsonl
+  artifacts: data/artifacts
+resources:
+  profile: rental-two-48gib
+  max_reserved_gib: 42
+  placement_status: awaiting_real_pretrained_cuda_measurement
+pilot:
+  training_seed_count: 1
+  scope: bounded_small_model_pilot
+  original_profile: configs/a6000.yaml
+  declared_changes:
+  - controller_27b_to_4b
+  - renderer_9b_to_4b
+  - judge_32b_to_8b_with_new_calibration
+  - two_48gib_devices
+  - shorter_sft_and_rl_budgets
+  - rl_tasks_6_to_2_roots_2_suffixes_2
+  - rl_warmup_10_to_1
+  family_minimums:
+    development: 64
+    calibration: 600
+    diagnostic-test: 32
+  quality_thresholds_reduced: false

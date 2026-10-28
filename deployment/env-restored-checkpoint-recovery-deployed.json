@@ -1,0 +1,138 @@
+{
+  "status": "deployed_and_queued",
+  "at": 1793173707.1644921,
+  "job": "env-restored-gpu-check",
+  "old_job": {
+    "id": "env-restored-gpu-check",
+    "title": "Restored Linux environment real actor and renderer GPU preflight",
+    "gpus": [
+      1
+    ],
+    "priority": 1,
+    "minimum_free_gib": 44,
+    "allow_overlap": false,
+    "exclusive_group": "restored-environment-gpu-check",
+    "after": [
+      "full-joint-rl32"
+    ],
+    "requires": [
+      "scripts/check_restored_environment_gpu.py",
+      "scripts/check_isolated_rental_restore.py",
+      "data/preflight/viewer_actor_task.jsonl",
+      "data/preflight/viewer_renderer_task.jsonl",
+      "deployment/env-restored-gpu-check-prepared.json"
+    ],
+    "command": [
+      "/usr/local/miniconda3/envs/py312/bin/python",
+      "-u",
+      "scripts/check_restored_environment_gpu.py",
+      "--gpu",
+      "1",
+      "--components",
+      "actor",
+      "renderer",
+      "--timeout-seconds",
+      "1800",
+      "--report",
+      "deployment/env-restored-gpu-check.json",
+      "--execute"
+    ],
+    "env": {
+      "OMP_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "PYTHONPATH": "src",
+      "PYTHONDONTWRITEBYTECODE": "1"
+    },
+    "pid_file": "deployment/env-restored-gpu-check.pid",
+    "exit_file": "deployment/env-restored-gpu-check.exit.json",
+    "started_file": "deployment/env-restored-gpu-check.started.json",
+    "log_file": "deployment/env-restored-gpu-check.log",
+    "budget": "Two sequential real-sample preflights, one cycle per component; maximum 1800 seconds per component; no production training updates or checkpoint writes",
+    "eta_note": "Wait for joint completion and an idle GPU1 with at least44 GiB free. Restored environment with bound current code/models; not full offline recovery.",
+    "gates": [
+      {
+        "path": "deployment/env-restored-gpu-check-prepared.json",
+        "key": "status",
+        "equals": "prepared"
+      }
+    ]
+  },
+  "new_job": {
+    "id": "env-restored-gpu-check",
+    "title": "Restore final joint checkpoint and archived Linux environment on both original GPUs",
+    "gpus": [
+      0,
+      1
+    ],
+    "priority": 0,
+    "minimum_free_gib": 44,
+    "allow_overlap": false,
+    "exclusive_group": "restored-environment-gpu-check",
+    "after": [
+      "full-joint-rl32",
+      "full-joint-rl32-export"
+    ],
+    "requires": [
+      "scripts/check_restored_environment_gpu.py",
+      "scripts/check_isolated_rental_restore.py",
+      "data/preflight/viewer_actor_task.jsonl",
+      "data/preflight/viewer_renderer_task.jsonl",
+      "deployment/env-restored-gpu-check-prepared.json",
+      "scripts/restored_checkpoint_recovery.py",
+      "delivery/priority-checkpoints/full-joint-rl32-complete.tar.gz",
+      "deployment/full-joint-rl32-export.json"
+    ],
+    "command": [
+      "/usr/local/miniconda3/envs/py312/bin/python",
+      "-u",
+      "scripts/check_restored_environment_gpu.py",
+      "--gpu",
+      "1",
+      "--components",
+      "actor",
+      "renderer",
+      "--timeout-seconds",
+      "1800",
+      "--report",
+      "deployment/env-restored-gpu-check.json",
+      "--execute",
+      "--recovery-archive",
+      "delivery/priority-checkpoints/full-joint-rl32-complete.tar.gz",
+      "--recovery-manifest",
+      "deployment/full-joint-rl32-export.json"
+    ],
+    "env": {
+      "OMP_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "PYTHONPATH": "src",
+      "PYTHONDONTWRITEBYTECODE": "1"
+    },
+    "pid_file": "deployment/env-restored-gpu-check.pid",
+    "exit_file": "deployment/env-restored-gpu-check.exit.json",
+    "started_file": "deployment/env-restored-gpu-check.started.json",
+    "log_file": "deployment/env-restored-gpu-check.log",
+    "budget": "One isolated checkpoint recovery plus one real-sample preflight per component, within1800 seconds after extraction; no production updates or writes to original checkpoints",
+    "eta_note": "Wait for final joint export and both GPUs with44 GiB free. Restore both trained models, optimizers, schedulers, original RNG and cursor; use current code and existing base model bindings with declared host dependencies.",
+    "gates": [
+      {
+        "path": "deployment/env-restored-gpu-check-prepared.json",
+        "key": "status",
+        "equals": "prepared"
+      },
+      {
+        "path": "deployment/full-joint-rl32-export.json",
+        "key": "status",
+        "equals": "completed"
+      }
+    ],
+    "reserve_gpus_when_ready": true
+  },
+  "cpu_test_output": ".....................\n----------------------------------------------------------------------\nRan 21 tests in 0.082s\n\nOK\n",
+  "actual_agent_export_schema_prepared": true,
+  "actual_agent_expected_members": 60,
+  "gpu_executed": false,
+  "checkpoint_recovery_verified": false,
+  "production_training_restarted": false
+}

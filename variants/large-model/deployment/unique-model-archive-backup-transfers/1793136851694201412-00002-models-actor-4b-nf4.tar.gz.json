@@ -1,0 +1,33 @@
+{
+  "status": "completed",
+  "started_at": 1793143821.045074,
+  "source": "/workspace/agentic-image-pilot-small/delivery/unique-models/1793136851694201412-00002-models-actor-4b-nf4.tar.gz",
+  "destination": "/Volumes/TOSHIBA EXT/dag-pilot-rental-backup-20261027T130933Z-9769b4/remote/unique-models-archives/1793136851694201412-00002-models-actor-4b-nf4.tar.gz",
+  "expected_bytes": 3351424733,
+  "workers": 2,
+  "controls": [
+    "/tmp/dag-pilot-rental-bulk2-ssh",
+    "/tmp/dag-pilot-rental-bulk3-ssh",
+    "/tmp/dag-pilot-rental-backup-ssh"
+  ],
+  "initial_bytes": 3343036125,
+  "pid": 81197,
+  "chunk_failures": [],
+  "completed_chunks": 800,
+  "control_order": [
+    "/tmp/dag-pilot-rental-backup-ssh",
+    "/tmp/dag-pilot-rental-bulk2-ssh",
+    "/tmp/dag-pilot-rental-bulk3-ssh"
+  ],
+  "existing_master_only": true,
+  "updated_at": 1793144074.9079978,
+  "received_bytes": 3351424733,
+  "average_bytes_per_second": 33043.847957881226,
+  "pending_chunks": 0,
+  "assembled_bytes": 3351424733,
+  "finished_at": 1793144074.858204,
+  "chunks": 800,
+  "sha256": "57615c46409787965a80ca3214dbd86bff62599a023b5d5b5c1c117a543053d0",
+  "source_checksum_verified": true,
+  "verification": "SSH authenticated transfer, exact chunk lengths, stable source size/mtime, exact assembled length; checksum streamed while assembling"
+}

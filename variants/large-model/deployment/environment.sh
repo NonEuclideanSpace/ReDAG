@@ -1,0 +1,26 @@
+export AGENTIC_PROJECT=/home/hdd4/dongzk/projects/agentic-image-v3
+export AGENTIC_STORAGE=/home/hdd3/dongzk/agentic-image-v3
+export HF_HOME="$AGENTIC_STORAGE/cache/huggingface"
+export UV_CACHE_DIR="$AGENTIC_STORAGE/cache/uv"
+export UV_PYTHON_INSTALL_DIR="$AGENTIC_STORAGE/tools/python"
+export PIP_CACHE_DIR="$AGENTIC_STORAGE/cache/pip"
+export XDG_CACHE_HOME="$AGENTIC_STORAGE/cache"
+export TMPDIR="$AGENTIC_STORAGE/tmp"
+export PATH="$AGENTIC_STORAGE/tools/bin:$PATH"
+export HF_HUB_DISABLE_TELEMETRY=1
+export TOKENIZERS_PARALLELISM=false
+cd "$AGENTIC_PROJECT"
+export HTTP_PROXY=http://127.0.0.1:7890
+export HTTPS_PROXY=http://127.0.0.1:7890
+export NO_PROXY=localhost,127.0.0.1,::1,.tsinghua.edu.cn,.aliyun.com,.ustc.edu.cn,.huaweicloud.com,.modelscope.cn,.modelscope.com,.aliyuncs.com,pypi.org,files.pythonhosted.org
+export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+export UV_HTTP_TIMEOUT=120
+export UV_HTTP_RETRIES=5
+export HF_HUB_DOWNLOAD_TIMEOUT=120
+export HF_HUB_ETAG_TIMEOUT=60
+export HF_HUB_DISABLE_XET=1
+export MAX_JOBS=4
+export CMAKE_BUILD_PARALLEL_LEVEL=4
+
+export NO_PROXY="$NO_PROXY,github.com,.github.com,.githubusercontent.com"
