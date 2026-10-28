@@ -1,0 +1,17 @@
+.DS_Store
+._*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+.venv-check/
+.venv-tools/
+.runtime/
+.cache/
+*.egg-info/
+build/
+dist/
+.env
+.env.*
+!.env.example
