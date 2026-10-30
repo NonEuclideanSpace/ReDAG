@@ -1,11 +1,14 @@
 """Several machines, one pipeline: shared jobs are claimed atomically, NOT_BEFORE orders side jobs, and a scheduler
 waiting for another machine keeps running instead of ending as stalled (standard library only)."""
 import argparse
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts' / 'launch'))
 import pipeline  # noqa: E402
@@ -106,15 +109,74 @@ def test_sync_compares_modification_times_to_the_nanosecond(monkeypatch):
     assert '--update' in seen[0] and '--modify-window=-1' in seen[0]
 
 
+def test_interrupted_transfers_never_leave_a_cut_off_file_under_the_real_name(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pipeline.subprocess, 'run', lambda cmd, **kwargs: seen.append(cmd))
+    pipeline.rsync('a/', 'b/', 'ssh', ['--exclude=*'])
+    cmd = seen[0]
+    assert '--partial' not in cmd and '--partial-dir=.rsync-partial' in cmd
+    assert cmd.index('--exclude=.rsync-partial/') < cmd.index('--exclude=*')
+
+
+def fake_rsync(calls, stdout=''):
+    def run(src, dst, ssh, filters, dry=False):
+        calls.append(filters)
+        return type('R', (), {'returncode': 0, 'stdout': stdout, 'stderr': ''})()
+    return run
+
+
 def test_sync_markers_follow_jobs_added_later(monkeypatch, tmp_path):
     for name in ('CANVAS_SHARDS', 'RS_SHARDS'):
         monkeypatch.delenv(name, raising=False)
     calls = []
-    monkeypatch.setattr(pipeline, 'rsync', lambda src, dst, ssh, filters, dry=False: calls.append(filters) or type('R', (), {'returncode': 0})())
+    monkeypatch.setattr(pipeline, 'rsync', fake_rsync(calls))
     pipeline.cmd_sync(type('A', (), {'peer': 'root@h:1', 'key': 'k', 'remote_root': '/r', 'loop': 0, 'dry_run': False})(), pipeline.settings())
-    finals = calls[1]
+    finals = calls[0]
+    assert '--out-format=%n' in finals
     assert '--include=runs/logs/*.done' in finals and '--exclude=runs/logs/preflight.done' in finals
     assert '--exclude=runs/logs/download_models.done' in finals and finals.index('--exclude=runs/logs/preflight.done') < finals.index('--include=runs/logs/*.done')
+    assert len(calls) == 4 and '--exclude=runs/logs/**' in calls[1]
+
+
+def test_sync_sends_only_the_markers_listed_before_the_outputs(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(pipeline, 'rsync', fake_rsync(calls, 'runs/\nruns/logs/\nruns/logs/rs_part1.done\nruns/logs/rs_part1.log\n'))
+    listings = []
+    real_unlink = pipeline.os.unlink
+    monkeypatch.setattr(pipeline.os, 'unlink', lambda path: listings.append(Path(path).read_text()) or real_unlink(path))
+    pipeline.cmd_sync(type('A', (), {'peer': 'root@h:1', 'key': 'k', 'remote_root': '/r', 'loop': 0, 'dry_run': False})(), pipeline.settings())
+    assert len(calls) == 6 and '--exclude=runs/logs/**' in calls[1]
+    assert any(f.startswith('--files-from=') for f in calls[2]) and '--out-format=%n' not in calls[2]
+    assert listings == ['runs/logs/rs_part1.done\nruns/logs/rs_part1.log\n'] * 2
+
+
+def test_sync_holds_back_a_marker_written_after_the_outputs_were_copied(monkeypatch, tmp_path):
+    if shutil.which('rsync') is None:
+        pytest.skip('rsync not installed')
+    remote, local = tmp_path / 'remote', tmp_path / 'local'
+    for root in (remote, local):
+        (root / 'runs' / 'logs').mkdir(parents=True)
+        (root / 'data' / 'final').mkdir(parents=True)
+    (remote / 'data' / 'final' / 'a.jsonl').write_text('a\n')
+    (remote / 'runs' / 'logs' / 'job_a.done').write_text('')
+    real, raced = pipeline.rsync, []
+
+    def racing(src, dst, ssh, filters, dry=False):
+        result = real(src.replace('root@h:', ''), dst.replace('root@h:', ''), ssh, filters, dry)
+        if '--exclude=runs/logs/**' in filters and src.startswith('root@h:') and not raced:
+            raced.append(1)
+            (remote / 'data' / 'final' / 'b.jsonl').write_text('b\n')
+            (remote / 'runs' / 'logs' / 'job_b.done').write_text('')
+        return result
+
+    monkeypatch.setattr(pipeline, 'rsync', racing)
+    monkeypatch.setattr(pipeline, 'ROOT', local)
+    args = type('A', (), {'peer': 'root@h:1', 'key': 'k', 'remote_root': str(remote), 'loop': 0, 'dry_run': False})()
+    pipeline.cmd_sync(args, pipeline.settings())
+    assert (local / 'runs' / 'logs' / 'job_a.done').exists() and (local / 'data' / 'final' / 'a.jsonl').read_text() == 'a\n'
+    assert not (local / 'runs' / 'logs' / 'job_b.done').exists()
+    pipeline.cmd_sync(args, pipeline.settings())
+    assert (local / 'runs' / 'logs' / 'job_b.done').exists() and (local / 'data' / 'final' / 'b.jsonl').read_text() == 'b\n'
 
 
 def test_unstarted_rejection_sampling_parts_split_into_pieces(monkeypatch):
