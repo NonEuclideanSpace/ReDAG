@@ -71,14 +71,17 @@ def compute_masked_gaussian_logprob(z_next, mu, sigma_t, mask_latent, dt, reduct
     return joint / count if reduction == 'mean' else joint
 
 
-def compute_transition_log_ratio(z_next, mu_new, mu_old, sigma_t, mask_latent, dt):
-    mask, _, var = gaussian_mask_terms(z_next, mu_new, sigma_t, mask_latent, dt)
+def compute_transition_log_ratio(z_next, mu_new, mu_old, sigma_t, mask_latent, dt, reduction='mean'):
+    mask, count, var = gaussian_mask_terms(z_next, mu_new, sigma_t, mask_latent, dt)
     if mu_old.shape != mu_new.shape or not torch.isfinite(mu_old).all():
         raise ValueError('Old transition means must be finite and match current means')
+    if reduction not in ('mean', 'sum'):
+        raise ValueError('Likelihood reduction must be mean or sum')
+    scale = 2 * count * var if reduction == 'mean' else 2 * var
     old_residual = z_next.double() - mu_old.detach().double()
     new_residual = z_next.double() - mu_new.double()
-    log_ratio = ((old_residual.square() - new_residual.square()) * mask).sum((1, 2, 3)) / (2 * var)
-    kl = ((mu_new.double() - mu_old.detach().double()).square() * mask).sum((1, 2, 3)) / (2 * var)
+    log_ratio = ((old_residual.square() - new_residual.square()) * mask).sum((1, 2, 3)) / scale
+    kl = ((mu_new.double() - mu_old.detach().double()).square() * mask).sum((1, 2, 3)) / scale
     return log_ratio, kl
 
 

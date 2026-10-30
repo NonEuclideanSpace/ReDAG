@@ -208,8 +208,8 @@ def test_joint_gaussian_ratio_matches_density_and_masked_kl():
     log_ratio, kl = compute_transition_log_ratio(target, new, old, sigma, mask, 0.02)
     def distribution(mean):
         return torch.distributions.Normal(mean.double(), sigma.double().view(1, 1, 1, 1) * 0.02**0.5)
-    expected = (distribution(new).log_prob(target.double())-distribution(old).log_prob(target.double())).sum()
-    assert torch.allclose(log_ratio.squeeze(), expected) and torch.allclose(kl.squeeze(), torch.tensor(3.125, dtype=torch.float64))
+    expected = (distribution(new).log_prob(target.double())-distribution(old).log_prob(target.double())).mean()
+    assert torch.allclose(log_ratio.squeeze(), expected) and torch.allclose(kl.squeeze(), torch.tensor(1.5625, dtype=torch.float64))
     with pytest.raises(ValueError):
         compute_masked_gaussian_logprob(target, old, torch.zeros(1), mask, 0.02)
 
