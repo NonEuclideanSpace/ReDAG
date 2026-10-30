@@ -167,9 +167,15 @@ class FluxEditor:
             raise ValueError("An RGB image is required")
         if not torch.isfinite(image).all() or image.min() < 0 or image.max() > 1:
             raise ValueError("Image values must be finite and within [0, 1]")
-        scale = max(1, math.ceil((2 ** len(self.vae.config.block_out_channels)) / min(image.shape[-2:])))
+        stride = 2 ** len(self.vae.config.block_out_channels)
+        scale = max(1, math.ceil(stride / min(image.shape[-2:])))
         if scale > 1:
             image = F.interpolate(image.float(), scale_factor=scale, mode="bilinear", align_corners=False)
+        pad_h, pad_w = (-image.shape[-2]) % stride, (-image.shape[-1]) % stride
+        if pad_h or pad_w:
+            # whole latent tokens only: decode_latents then crops instead of replicating missing border rows
+            mode = "reflect" if pad_h < image.shape[-2] and pad_w < image.shape[-1] else "replicate"
+            image = F.pad(image.float(), (0, pad_w, 0, pad_h), mode=mode)
         image = image.to(device=self.device, dtype=self.vae.dtype) * 2 - 1
         latent = self.vae.encode(image).latent_dist.mode()
         if latent.shape[-2] % 2 or latent.shape[-1] % 2:
@@ -209,7 +215,9 @@ class FluxEditor:
             mask = F.interpolate(mask, scale_factor=scale, mode="nearest")
         height, width = (size * stride for size in latent.shape[-2:])
         mask = F.pad(mask, (0, max(0, width - mask.shape[-1]), 0, max(0, height - mask.shape[-2])), mode="replicate")
-        mask = F.interpolate(mask[:, :, :height, :width], size=latent.shape[-2:], mode="nearest")
+        # a latent token is editable when any pixel it covers is editable (nearest sampling kept only the
+        # top-left pixel of every 16 x 16 cell and could drop thin or off-grid masks entirely)
+        mask = F.max_pool2d(mask[:, :, :height, :width], kernel_size=stride, stride=stride)
         if not mask.any():
             raise ValueError("The edit mask disappears at latent resolution")
         return mask

@@ -113,23 +113,37 @@ def collect_controller_rs(records, harness, controller, editor, output, seed=42)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     images = output.parent / (output.stem + '_images')
-    selected = 0
-    with output.open('w', encoding='utf-8') as stream:
+    selected, done = 0, set()
+    if output.exists():  # resume: rows already written are kept; a line cut off by a crash is dropped
+        kept = []
+        for line in output.read_text(encoding='utf-8').splitlines():
+            try:
+                done.add(json.loads(line)['id'])
+                kept.append(line)
+            except (ValueError, KeyError, TypeError):
+                continue
+        output.write_text(''.join(line + '\n' for line in kept), encoding='utf-8')
+    with output.open('a', encoding='utf-8') as stream:
         for index, record in enumerate(records):
+            identifier = str(record.get('id', f'state_{index:06d}'))
+            if identifier in done:
+                continue
             state, dag = state_from_record(record, harness)
             frontier = compute_active_frontier(dag, state.scores, harness.config.gate_tau)
             if not frontier:
                 continue
             candidates = harness.sample_group(state, dag, controller, editor, frontier[0], 3, seed + index * 3)
+            if not candidates:  # execution budget exhausted before any candidate was scored
+                continue
             best = max(candidates, key=lambda c: c['reward'])
             if not best['accepted'] or best['reward'] <= 0:
                 continue
             image_path = images / f'{index:06d}.png'
             save_image(state.image, image_path)
-            row = dict(image=str(image_path.relative_to(output.parent)), graph=dag_to_dict(dag), scores=state.scores,
+            row = dict(id=identifier, image=str(image_path.relative_to(output.parent)), graph=dag_to_dict(dag), scores=state.scores,
                        protected_set=sorted(state.protected_set), target_node_id=frontier[0], action=asdict(best['action']), reward=best['reward'],
                        detected_count=harness.grounder.counts.get(dag.nodes[frontier[0]].entity_phrase, 1) if harness.grounder else 1)
             stream.write(json.dumps(row, ensure_ascii=False) + '\n')
             stream.flush()
             selected += 1
-    return {'parents': len(records), 'accepted': selected}
+    return {'parents': len(records), 'accepted': selected, 'previously_accepted': len(done)}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Phase 3 - supervised stages (eq. 17, 19-20, 24), ~17 GPU-h:
-#   editor SFT (GPU1) || planner QLoRA SFT (GPU0)  ->  controller rejection sampling with the SFT editor
-#   (N_state x 3 candidates, two processes)  ->  controller SFT.
+#   editor SFT (GPU1) || planner QLoRA SFT + planner graph evaluation (GPU0)  ->  controller rejection sampling with
+#   the SFT editor (N_state x 3 candidates, two processes, resumable)  ->  controller SFT.
 source "$(dirname "$0")/env.sh"
 require_gpus 2 || exit 1
 SFT=$RUNS/sft
@@ -9,8 +9,15 @@ mkdir -p "$SFT"
 
 run_job sft_editor  $PY scripts/run_sft_editor.py  --data "$DATA/editor_sft_train.jsonl" --output "$SFT/editor" \
     --model "$EDITOR" --device "$GPU1" --epochs "${EDITOR_EPOCHS:-1}" &
-run_job sft_planner $PY scripts/run_sft_planner.py --data "$DATA/planner_sft.jsonl" --output "$SFT/planner" \
-    --model "$PLANNER" --device "$GPU0" --epochs "${PLANNER_EPOCHS:-1}" &
+# planner (eq. 15-17): QLoRA SFT, then graph-level evaluation of the zero-shot base and the SFT adapter on held-out pairs
+(
+    run_job sft_planner $PY scripts/run_sft_planner.py --data "$DATA/planner_sft.jsonl" --output "$SFT/planner" \
+        --model "$PLANNER" --device "$GPU0" --epochs "${PLANNER_EPOCHS:-1}" || exit 1
+    run_job eval_planner_zero_shot $PY scripts/run_eval_planner.py --data "$DATA/planner_sft_dev.jsonl" --model "$PLANNER" \
+        --device "$GPU0" --output "$RUNS/eval/planner_zero_shot.json" || exit 1
+    run_job eval_planner_sft $PY scripts/run_eval_planner.py --data "$DATA/planner_sft_dev.jsonl" --model "$PLANNER" \
+        --adapter "$SFT/planner" --device "$GPU0" --output "$RUNS/eval/planner_sft.json" || exit 1
+) &
 wait_all || exit 1
 
 # Rejection sampling: one process per GPU, each holding controller + editor(SFT) + verifier + grounder (~71 GB).
@@ -33,7 +40,7 @@ else
         --data "$DATA/controller_rs_states.jsonl" --output "$DATA/controller_sft.jsonl" || exit 1
 fi
 echo "accepted rejection-sampling rows: $(wc -l < "$DATA/controller_sft.jsonl")"
-run_job check_controller_sft $PY scripts/data/check_data.py || exit 1
+run_job check_controller_sft $PY scripts/data/check_data.py --only controller_sft || exit 1
 run_job sft_controller $PY scripts/run_sft_controller.py --data "$DATA/controller_sft.jsonl" --output "$SFT/controller" \
     --model "$CONTROLLER" --device "$GPU0" --epochs "${CONTROLLER_EPOCHS:-2}" || exit 1
 echo "Phase 3 complete: adapters in $SFT/{editor,planner,controller}"

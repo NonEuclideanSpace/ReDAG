@@ -113,7 +113,7 @@ def main():
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        validate_dataset(records, args.exp_id, args.allow_small_dataset)
+        validate_dataset(records, args.exp_id, args.allow_small_dataset, require_graphs=True)
         saved, descriptions, serial = defaultdict(dict), {}, 0
         for stage, checkpoints in stages.items():
             args.controller_adapter, args.editor_adapter = checkpoints['controller'], checkpoints['editor']

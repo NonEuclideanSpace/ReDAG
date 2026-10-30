@@ -96,7 +96,9 @@ class ReDAGHarness:
                 sample = controller.sample(state, graph, target_node_id, seed=seed + index, temperature=0.8,
                     detected_count=self.grounder.counts.get(dag.nodes[target_node_id].entity_phrase, 1) if self.grounder else 1)
                 self.generation_counter += 1
-                crop = editor.render(state.image, sample['action'], seed=42)
+                # common editor noise inside one group (candidates differ only by their action),
+                # different noise across groups, steps and evaluation seeds
+                crop = editor.render(state.image, sample['action'], seed=seed)
                 try:
                     self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop)
                 except RuntimeError as error:
@@ -278,14 +280,20 @@ def load_runtime(args, trainable_controller=False, trainable_editor=False):
     return ReDAGHarness(verifier, grounder), controller, editor
 
 
-def validate_dataset(records, experiment, diagnostic):
+def validate_dataset(records, experiment, diagnostic, require_graphs=False):
+    """Check the K = 10/20/30 tiers of a main evaluation.
+
+    Every session with complete graphs is validated (all turns merge into a valid ConditionDAG).  Sessions
+    whose turns still need the planner cannot be counted yet: they are accepted only before planning
+    (require_graphs=False); after planning every session must have graphs and the tiers must be complete.
+    """
     from collections import defaultdict
     from redag.models.planner import preserve_previous_conditions
     if not records:
         raise ValueError('Evaluation data must not be empty')
     if diagnostic or experiment == 2:
         return
-    counts = defaultdict(int)
+    counts, unplanned = defaultdict(int), 0
     for record in records:
         graph = None
         for turn in record.get('turns', [record]):
@@ -294,7 +302,12 @@ def validate_dataset(records, experiment, diagnostic):
                 break
             graph = preserve_previous_conditions(turn.get('graph', turn.get('dag')), graph, turn.get('superseded_ids', turn.get('supersedes')))
         if graph is None:
-            return
+            unplanned += 1
+            continue
         counts[len(graph.nodes)] += 1
+    if unplanned:
+        if require_graphs:
+            raise ValueError(f'{unplanned} sessions still have turns without a condition graph')
+        return  # tiers are enforced again once the planner has produced every graph
     if set(counts) != {10, 20, 30} or any(n < 100 for n in counts.values()):
         raise ValueError('Main evaluations require at least 100 sessions for each K=10/20/30')

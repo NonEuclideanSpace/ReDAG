@@ -10,10 +10,10 @@ nohup bash scripts/launch/03_sft.sh > runs/logs/phase3.out 2>&1 &
 | phase | script | needs | what it does |
 |---|---|---|---|
 | 1 | `01_prepare_data.sh` | no GPU | download MagicBrush and CoReBench; build MagicBrush crops and sessions; convert CoReBench, LGBench and LongBench-T2I; choose the sessions to annotate |
-| 0 | `00_check_env.sh` | GPUs | GPUs, complete weights (no `*.incomplete`), imports, `pytest`, data check |
+| 0 | `00_check_env.sh` | GPUs | GPUs, complete weights (no partial or missing shards), kernels, `pytest`, full CPU wiring check with tiny models, data check |
 | S | `smoke_test.sh` | GPUs | every GPU stage on a few records (~30–45 min); real per-step timings |
 | 2 | `02_data_gpu.sh` | GPUs | LLM graph annotation on both GPUs → `build_sets` → canvases → RL state grounding → check |
-| 3 | `03_sft.sh` | GPUs | editor SFT ∥ planner QLoRA → rejection sampling (1000 × 3) → controller SFT |
+| 3 | `03_sft.sh` | GPUs | editor SFT ∥ (planner QLoRA → planner graph evaluation, zero-shot vs SFT) → rejection sampling (1000 × 3, resumable) → controller SFT |
 | 4 | `04_rl.sh` | GPUs | main alternating RL (checkpoints for experiment 3) + experiment 2's three reward runs |
 | 5 | `05_eval.sh` | GPUs | experiments 1 / 2 / 3 (`EXP="1 3"` and similar select a subset; parts merge automatically) |
 
@@ -43,3 +43,9 @@ To extrapolate from the smoke test:
 - **RL**: `step_wall_seconds` in `runs/smoke/rl/metrics.jsonl` × (training parents / 4) × 4 stages.
 
 If a single evaluation step costs more than about 15 s, lower `GEN_BUDGET` before the long runs start.
+
+## Checks that need no GPU
+
+- `python -m pytest -q tests`: unit tests, about 10 s.
+- `python scripts/launch/wiring_check.py --light`: builds tiny random models from the real configs, tokenizers and processors, then exercises the controller, planner, verifier and editor code paths and the grounding processors. It fits AutoDL's 2 GiB no-GPU mode.
+- Without `--light`, the wiring check also trains and evaluates with every tiny part together: SFT, rejection sampling, alternating RL and an evaluation session. `00_check_env.sh` runs this full version after you switch to GPU mode.
