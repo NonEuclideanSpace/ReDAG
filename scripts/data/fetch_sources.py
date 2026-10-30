@@ -20,6 +20,9 @@ from pathlib import Path
 
 from _common import RAW, log
 
+# env.sh puts every job in offline mode (weights are local); downloading is this script's whole purpose
+for _flag in ('HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE', 'HF_DATASETS_OFFLINE'):
+    os.environ.pop(_flag, None)
 os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
 os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
 os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '60')
