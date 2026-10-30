@@ -46,6 +46,20 @@ def test_checklist_answer_keeps_questions_and_adds_entities():
         to_graph({'nodes': value['nodes'][1:]}, CHECKLIST, 'checklist')  # q01 missing
 
 
+def test_checklist_answer_with_the_models_own_nodes_is_salvaged():
+    # the model adds a relation node r1 and an object node o1 (wrong id) next to the checklist items
+    value = {'nodes': [node('q01', 'relation', 'x?', 'chef', ['r1']), node('r1', 'relation', 'Is the chef near the hat?', 'chef', ['o1', 'e2']),
+                       node('o1', 'entity', 'Is there a chef?', 'chef'), node('e2', 'entity', 'Is there a hat?', 'hat'),
+                       node('q02', 'entity', 'x?', 'knife'), node('q03', 'attribute', 'y?', 'knife', ['q02'])],
+             'comp_edges': [['o1', 'q01'], ['e2', 'r1'], ['q02', 'q03']]}
+    graph, _, _, _, warnings = to_graph(value, CHECKLIST, 'checklist')
+    nodes = {n['node_id']: n for n in graph['nodes']}
+    assert set(nodes) == {'q01', 'q02', 'q03', 'e2', 'e3'}                 # r1 dropped, o1 renamed to the next free e<k>
+    assert sorted(nodes['q01']['depends_on']) == ['e2', 'e3']             # inherited r1's dependencies
+    assert ['e3', 'q01'] in graph['comp_edges'] and not any('r1' in e for e in graph['comp_edges'])
+    assert any('dropped' in w for w in warnings) and any('renamed' in w for w in warnings)
+
+
 def test_instruction_answer_is_sanitized_and_superseded_is_kept():
     row = instruction_graph()
     assert row['superseded'] == {'2': ['t1_1']} and ['t2_1', 'i1'] not in row['graph']['comp_edges']
