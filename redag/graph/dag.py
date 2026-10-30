@@ -44,29 +44,59 @@ def get_int_neighbors(dag: ConditionDAG, seed_nodes: Set[str]) -> Set[str]:
             neighbors.add(u)
     return neighbors
 
-def compute_affected_subgraph(dag: ConditionDAG, action: ControllerAction, target_node_id: str) -> Set[str]:
-    window: BBox = action.box
-    B_a: Set[str] = {target_node_id}
-    for nid, node in dag.nodes.items():
-        if node.bbox is not None and boxes_intersect(node.bbox, window):
-            B_a.add(nid)
-    tilde_B_a: Set[str] = B_a | get_comp_descendants(dag, B_a)
-    int_nb: Set[str] = get_int_neighbors(dag, tilde_B_a)
-    for nid in tilde_B_a:
-        b_u = dag.nodes[nid].bbox
-        if b_u is None:
+def condition_dependencies(dag: ConditionDAG, node_id: str) -> Set[str]:
+    return set(dag.nodes[node_id].depends_on) | {p for p, c in dag.comp_edges + dag.supp_edges if c == node_id}
+
+
+def semantic_support(dag: ConditionDAG, node_id: str) -> BBox | None:
+    pending, seen, boxes = [node_id], set(), []
+    while pending:
+        nid = pending.pop()
+        if nid in seen:
             continue
-        for other_id, other_node in dag.nodes.items():
-            if other_node.bbox is not None and boxes_intersect(b_u, other_node.bbox):
-                int_nb.add(other_id)
-    touched_phrases = {dag.nodes[nid].entity_phrase for nid in tilde_B_a if dag.nodes[nid].entity_phrase}
-    q_global: Set[str] = set()
+        seen.add(nid)
+        node = dag.nodes[nid]
+        dependencies = condition_dependencies(dag, nid)
+        if node.scope != 'local' or node.node_type in ('background', 'count', 'prohibition') or node.bbox is None:
+            return None
+        if node.node_type == 'relation' and len(dependencies) < 2:
+            return None
+        boxes.append(node.bbox)
+        pending.extend(dependencies - seen)
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def get_dependency_descendants(dag: ConditionDAG, seed_nodes: Set[str]) -> Set[str]:
+    affected = set(seed_nodes)
+    while True:
+        expanded = affected | {nid for nid in dag.nodes if condition_dependencies(dag, nid) & affected}
+        if expanded == affected:
+            return affected - seed_nodes
+        affected = expanded
+
+
+def compute_spatial_subgraph(dag: ConditionDAG, action: ControllerAction, target_node_id: str) -> Set[str]:
+    if target_node_id not in dag.nodes:
+        raise ValueError('Target condition must exist')
+    affected = {target_node_id}
     for nid, node in dag.nodes.items():
-        if node.node_type in ('background', 'prohibition'):
-            q_global.add(nid)
-        elif node.node_type == 'count' and node.entity_phrase in touched_phrases:
-            q_global.add(nid)
-    return tilde_B_a | int_nb | q_global
+        if semantic_support(dag, nid) is None or boxes_intersect(node.bbox, action.box):
+            affected.add(nid)
+    return affected
+
+
+def compute_affected_subgraph(dag: ConditionDAG, action: ControllerAction, target_node_id: str) -> Set[str]:
+    affected = compute_spatial_subgraph(dag, action, target_node_id)
+    affected |= get_dependency_descendants(dag, affected)
+    neighbors = get_int_neighbors(dag, affected)
+    for nid in affected:
+        node = dag.nodes[nid]
+        if semantic_support(dag, nid) is None:
+            continue
+        neighbors.update(other for other, candidate in dag.nodes.items()
+                         if semantic_support(dag, other) is not None and boxes_intersect(node.bbox, candidate.bbox))
+    affected |= neighbors
+    return affected | get_dependency_descendants(dag, affected)
 
 def compute_active_frontier(dag: ConditionDAG, scores: Dict[str, float], gate_tau: float=0.5) -> List[str]:
     comp_parents: Dict[str, List[str]] = {nid: [] for nid in dag.nodes}
@@ -107,7 +137,5 @@ def classify_failure_mode(dag: ConditionDAG, node_id: str, scores: Dict[str, flo
 
 def topological_nodes(dag: ConditionDAG) -> List[str]:
     from graphlib import TopologicalSorter
-    parents = {nid: set() for nid in dag.nodes}
-    for parent, child in dag.comp_edges:
-        parents[child].add(parent)
+    parents = {nid: condition_dependencies(dag, nid) for nid in dag.nodes}
     return list(TopologicalSorter(parents).static_order())

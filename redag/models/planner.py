@@ -7,9 +7,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-
 from redag.graph.schema import ConditionDAG, ConditionNode
-
 
 def parse_json_object(text):
     if isinstance(text, dict):
@@ -33,11 +31,9 @@ def parse_json_object(text):
             continue
     raise ValueError("Expected a JSON object")
 
-
 def dag_to_dict(dag):
     return {"nodes": [asdict(n) for n in dag.nodes.values()],
             "comp_edges": dag.comp_edges, "supp_edges": dag.supp_edges, "int_edges": dag.int_edges}
-
 
 def dag_from_dict(value):
     value = parse_json_object(value)
@@ -50,15 +46,39 @@ def dag_from_dict(value):
         if node.node_id in nodes:
             raise ValueError(f"Duplicate node ID: {node.node_id}")
         nodes[node.node_id] = node
-    if not nodes:
-        raise ValueError("A condition graph must contain at least one node")
     edges = {key: [tuple(edge) for edge in value.get(key, [])]
              for key in ("comp_edges", "supp_edges", "int_edges")}
-    for group in edges.values():
-        if any(len(edge) != 2 or any(nid not in nodes for nid in edge) for edge in group):
-            raise ValueError("Graph edges must reference existing nodes")
     return ConditionDAG(nodes=nodes, **edges)
 
+def preserve_previous_conditions(value, previous_dag=None, superseded_ids=None):
+    value = dag_to_dict(value) if isinstance(value, ConditionDAG) else parse_json_object(value)
+    superseded = value.get("superseded_ids", []) if superseded_ids is None else superseded_ids
+    if not isinstance(superseded, (tuple, list)) or any(not isinstance(nid, str) for nid in superseded):
+        raise ValueError("Superseded IDs must be a list of previous condition IDs")
+    if previous_dag is None:
+        if superseded:
+            raise ValueError("Cannot supersede conditions without a previous graph")
+        return dag_from_dict(value)
+    previous = previous_dag if isinstance(previous_dag, ConditionDAG) else dag_from_dict(previous_dag)
+    superseded = set(superseded)
+    if not superseded <= previous.nodes.keys():
+        raise ValueError("Superseded IDs must identify previous conditions")
+    raw = value.get("nodes", [])
+    raw = [dict(node, node_id=nid) for nid, node in raw.items()] if isinstance(raw, dict) else raw
+    if len({node["node_id"] for node in raw}) != len(raw):
+        raise ValueError("Duplicate planned node ID")
+    nodes = {node["node_id"]: node for node in raw}
+    nodes.update({nid: asdict(node) for nid, node in previous.nodes.items() if nid not in superseded})
+    for nid, node in nodes.items():
+        missing = set(node.get("depends_on", [])) - nodes.keys()
+        if nid in previous.nodes and nid not in superseded and missing and missing <= superseded:
+            node["depends_on"], node["scope"] = [dep for dep in node["depends_on"] if dep not in missing], "unknown"
+    merged = {"nodes": list(nodes.values())}
+    for name in ("comp_edges", "supp_edges", "int_edges"):
+        retained = [edge for edge in getattr(previous, name) if not set(edge) & superseded]
+        edges = [tuple(edge) for edge in value.get(name, [])] + retained
+        merged[name] = list(dict.fromkeys(edges))
+    return dag_from_dict(merged)
 
 def image_to_pil(image):
     from PIL import Image
@@ -70,7 +90,6 @@ def image_to_pil(image):
     array = image.detach().float().cpu().clamp(0, 1).mul(255).round().byte().permute(1, 2, 0).numpy()
     return Image.fromarray(array)
 
-
 def append_tokens(inputs, tokens):
     result = dict(inputs)
     result["input_ids"] = torch.cat((inputs["input_ids"], tokens), dim=1)
@@ -80,7 +99,6 @@ def append_tokens(inputs, tokens):
             result[key] = torch.cat((inputs[key], torch.zeros_like(tokens, dtype=inputs[key].dtype)), dim=1)
     result.pop("position_ids", None)
     return result
-
 
 def teacher_forced_batch(owner, examples):
     logits, labels = [], []
@@ -108,13 +126,13 @@ def teacher_forced_batch(owner, examples):
     return (torch.cat([F.pad(x, (0, 0, 0, width - x.shape[1])) for x in logits]),
             torch.cat([F.pad(x, (0, width - x.shape[1]), value=-100) for x in labels]))
 
-
 class Planner:
     default_model_id = "Qwen/Qwen3.8-27B"
 
     def __init__(self, model, processor, max_new_tokens=2048):
         self.model, self.processor = model, processor
         self.max_new_tokens = max_new_tokens
+        self.last_superseded_ids = ()
         self.model.eval()
 
     @classmethod
@@ -184,14 +202,19 @@ class Planner:
 
     def messages(self, user_prompt, previous_dag=None):
         system = (
-            "Parse the image requirements into atomic yes/no conditions. Output only JSON with keys "
-            "nodes, comp_edges, supp_edges, int_edges. Each node contains node_id, node_type, question, "
-            "entity_phrase, weight, and optional bbox, threshold, expected_count. node_type is one of "
-            "background, entity, attribute, relation, count, prohibition. Use positive weights and "
-            "normalized original-image boxes [x1,y1,x2,y2] if known; otherwise bbox is null. "
-            "comp_edges point from entities to dependent conditions; supp_edges from bearers to borne "
-            "objects; int_edges are undirected interference pairs. Directed dependencies must be acyclic. "
-            "Keep previous conditions and IDs unless the user explicitly supersedes them. Return the complete graph."
+            "Parse requirements into atomic yes/no conditions. Return JSON: nodes, comp_edges, supp_edges, int_edges. "
+            "Each node contains node_id, node_type, question, entity_phrase, weight, scope, depends_on; optional bbox, threshold, expected_count. "
+            "node_type: background, entity, attribute, relation, count, prohibition. Weights are positive. "
+            "Use original-image normalized bbox [x1,y1,x2,y2] if known, otherwise null. "
+            "comp_edges: entity to dependent; supp_edges: bearer to borne; int_edges: undirected interference. Dependencies must be acyclic. "
+            "scope is local, global or unknown. depends_on lists every condition or object ID needed to judge this node. "
+            "Use global for uniqueness, unrestricted counts, absence, whole-image style and comparisons to all objects, "
+            "including 'the only red object'. New objects can invalidate these even outside the target box. "
+            "Use local only when all dependencies are known and bounded; relations must list every participating object. "
+            "Use unknown whenever coverage is uncertain. A box alone never proves a condition is local. "
+            "Keep previous conditions and IDs unless the new user request explicitly supersedes them. "
+            "Only explicit replacements/removals get optional top-level superseded_ids listing previous IDs. "
+            "Additions never supersede prior conditions. Return the complete graph."
         )
         text = user_prompt
         if previous_dag is not None:
@@ -200,20 +223,28 @@ class Planner:
         return [{"role": "system", "content": system}, {"role": "user", "content": text}]
 
     @torch.no_grad()
-    def plan(self, user_prompt, previous_dag=None):
+    def plan(self, user_prompt, previous_dag=None, superseded_ids=None):
         self.model.eval()
+        if superseded_ids:
+            user_prompt += "\nExplicitly superseded previous condition IDs: " + json.dumps(list(superseded_ids))
         inputs = self.encode(self.messages(user_prompt, previous_dag))
         generated = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
         text = self.processor.decode(generated[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-        return dag_from_dict(text)
+        value = parse_json_object(text)
+        superseded = value.get("superseded_ids", []) if superseded_ids is None else superseded_ids
+        dag = preserve_previous_conditions(value, previous_dag, superseded)
+        self.last_superseded_ids = tuple(superseded)
+        return dag
 
     def sft_batch(self, records):
         examples = []
         for record in records:
             response = record.get("response", record.get("dag", record.get("graph")))
-            if isinstance(response, ConditionDAG):
-                response = dag_to_dict(response)
-            dag = dag_from_dict(response)
+            response = dag_to_dict(response) if isinstance(response, ConditionDAG) else parse_json_object(response)
+            dag = preserve_previous_conditions(response, record.get("previous_dag"))
+            target = dag_to_dict(dag)
+            if "superseded_ids" in response:
+                target["superseded_ids"] = response["superseded_ids"]
             examples.append((self.messages(record["user_prompt"], record.get("previous_dag")),
-                             json.dumps(dag_to_dict(dag), ensure_ascii=False)))
+                             json.dumps(target, ensure_ascii=False)))
         return teacher_forced_batch(self, examples)

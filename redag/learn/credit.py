@@ -1,4 +1,7 @@
 import torch
+import json
+import random
+from pathlib import Path
 from typing import Dict, List, Set
 from redag.graph.schema import ConditionDAG
 
@@ -33,3 +36,60 @@ def compute_pairwise_advantages(rewards: List[float], delta_noise: float=0.015, 
     advantages = (omega * clipped).sum(dim=1) / float(G - 1)
     assert torch.abs(advantages.sum()).item() < 1e-05, f'Zero-sum violated: {advantages.sum().item()}'
     return advantages
+
+
+def credit_experiment(args, records, harness, controller, editor, planner, result, folder):
+    from redag.harness.environment import run_record
+    from redag.learn.rl_trainer import ablation_reward
+    from redag.verify.verifier import export_view
+    rng, curves, audits, skipped = random.Random(args.seed), [], [], 0
+    methods = ('terminal_broadcast', 'step_full_table', 'subgraph_credit_ours')
+    for index, record in enumerate(records):
+        _, _, trace = run_record(record, harness, controller, editor, args.max_steps, args.seed + index, 6, planner)
+        for step_index, step in enumerate(trace):
+            if len(step['candidate_group']) != 6:
+                skipped += 1
+                continue
+            groups = {method: [] for method in methods}
+            for candidate_index, candidate in enumerate(step['candidate_group']):
+                before, delivered, graph = candidate['parent_state'], candidate['delivered_state'], candidate['dag']
+                for method in methods:
+                    groups[method].append(ablation_reward(method, before, delivered, graph, candidate['reward'], harness, controller, editor, args.max_steps))
+                if rng.random() < 0.05:
+                    identifier = f'audit_{index}_{step_index}_{candidate_index}'
+                    audits.append({'source': 'evaluation_diagnostic', 'protection_lambda': harness.lam, 'before': export_view(before.image, graph, folder, identifier + '_before'), 'after': export_view(delivered.image, graph, folder, identifier + '_after'), 'affected': sorted(candidate['affected']), 'protected': sorted(before.protected_set)})
+            for method, rewards in groups.items():
+                values = torch.tensor(rewards)
+                advantages = compute_pairwise_advantages(rewards) if method == 'subgraph_credit_ours' else (values - values.mean()) * 6 / 5
+                curves.append({'session': index, 'step': step_index, 'method': method, 'rewards': rewards, 'advantages': advantages.tolist(), 'reward_variance': float(values.var(unbiased=False)), 'advantage_variance': float(advantages.var(unbiased=False))})
+    result['diagnostic_reward_advantage_curves'] = curves
+    result['diagnostic_incomplete_groups'] = skipped
+    result.setdefault('full_audits', []).extend(audits)
+
+
+def validate_logs(path):
+    from redag.learn.sft_trainer import read_records
+    paths = json.loads(Path(path).read_text())
+    methods = {'terminal_broadcast', 'step_full_table', 'subgraph_credit_ours'}
+    if set(paths) != methods:
+        raise ValueError('Training logs must cover all three reward methods')
+    files = {name: Path(path).parent / file for name, file in paths.items()}
+    logs = {name: read_records(file) for name, file in files.items()}
+    settings = []
+    for name, rows in logs.items():
+        required = {'round', 'step', 'stage', 'optimizer_updates', 'reward_variance', 'advantage_variance', 'dev_acceptance_p'}
+        if not rows or any(row.get('method') != name or not required <= row.keys() for row in rows):
+            raise ValueError('Training logs must contain actual method-specific training measurements')
+        config = json.loads((files[name].parent / 'training_config.json').read_text())
+        if config.pop('method') != name:
+            raise ValueError('Training configuration method does not match its measurements')
+        settings.append(config)
+    signatures = [[(r['round'], r['stage'], r['step']) for r in rows] for rows in logs.values()]
+    if any(s != signatures[0] for s in signatures[1:]) or any(s != settings[0] for s in settings[1:]):
+        raise ValueError('Reward comparisons require the same configuration, seeds and training budgets')
+    audits = []
+    for file in files.values():
+        audit_file = file.parent / 'training_audits.jsonl'
+        if audit_file.exists() and audit_file.stat().st_size:
+            audits.extend(dict(row, source='actual_training') for row in read_records(audit_file))
+    return logs, audits

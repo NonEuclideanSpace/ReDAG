@@ -12,7 +12,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', required=True)
     parser.add_argument('--output', required=True)
-    parser.add_argument('--model', default='black-forest-labs/FLUX.2-klein-9B')
+    parser.add_argument('--model', default='black-forest-labs/FLUX.2-klein-base-9B')
     parser.add_argument('--adapter')
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--epochs', type=int, default=1)

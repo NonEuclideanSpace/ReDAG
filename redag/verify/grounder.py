@@ -79,7 +79,9 @@ class Grounder:
     def ground(self, image, dag, node_ids=None):
         result = deepcopy(dag)
         selected = set(dag.nodes) if node_ids is None else set(node_ids)
-        self.masks = {k: v for k, v in self.masks.items() if k not in selected}
+        self.masks = {k: v for k, v in self.masks.items() if k in dag.nodes and k not in selected}
+        if node_ids is None:
+            self.counts = {}
         height, width = image.shape[-2:]
         detections, used = {}, {}
         for nid in topological_nodes(result):
@@ -96,7 +98,8 @@ class Grounder:
                         boxes.append(b)
                 detections[phrase] = boxes
                 self.counts[phrase] = len(boxes)
-                used[phrase] = set()
+                occupied = [n.bbox for key, n in dag.nodes.items() if key not in selected and n.node_type == "entity" and n.entity_phrase == phrase and n.bbox]
+                used[phrase] = {i for i, box in enumerate(boxes) if any(compute_box_iou(box, previous) > 0.5 for previous in occupied)}
             boxes = detections[phrase]
             if node.node_type == 'count':
                 node.bbox = None
@@ -118,7 +121,8 @@ class Grounder:
             node = result.nodes[nid]
             if nid not in selected or node.node_type not in ('attribute', 'relation'):
                 continue
-            parents = [result.nodes[p].bbox for p, c in result.comp_edges if c == nid and result.nodes[p].bbox is not None]
+            owners = list(dict.fromkeys([p for p, c in result.comp_edges if c == nid] + node.depends_on))
+            parents = [result.nodes[p].bbox for p in owners if result.nodes[p].bbox is not None]
             if node.node_type == 'attribute':
                 node.bbox = parents[0] if parents else None
             elif parents:

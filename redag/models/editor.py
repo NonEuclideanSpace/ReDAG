@@ -36,7 +36,8 @@ def sample_flow_sde_trajectory(
 
     dt = 1.0 / num_steps
     z_t, eps_src = noise(), noise()
-    t_steps, z_t_list, z_next_list, logp_old_list = [], [], [], []
+    z_t = mask * z_t + (1 - mask) * eps_src
+    t_steps, z_t_list, z_next_list, logp_old_list, mu_old_list = [], [], [], [], []
     for k in range(num_steps):
         t_val, t_next = (num_steps - k) / num_steps, (num_steps - k - 1) / num_steps
         t = torch.tensor([t_val], device=source.device, dtype=torch.float32)
@@ -45,27 +46,30 @@ def sample_flow_sde_trajectory(
         ).float()
         mu, sigma = compute_flow_sde_drift_mean(z_t, velocity, t, dt=dt, eta=eta)
         z_next = mu + sigma.reshape(1, 1, 1, 1) * math.sqrt(dt) * noise()
-        old_logprob = compute_masked_gaussian_logprob(z_next, mu, sigma, mask, dt=dt)
+        old_logprob = compute_masked_gaussian_logprob(z_next, mu, sigma, mask, dt=dt) if bool((sigma > 0).all()) else None
         z_next = (1 - mask) * ((1 - t_next) * source + t_next * eps_src) + mask * z_next
         if not torch.isfinite(z_next).all():
             raise FloatingPointError("Flow-SDE generated a non-finite latent")
-        t_steps.append(t[0].detach())
-        z_t_list.append(z_t[0].detach())
-        z_next_list.append(z_next[0].detach())
-        logp_old_list.append(old_logprob[0].detach())
+        t_steps.append(t[0].detach().cpu())
+        z_t_list.append(z_t[0].detach().cpu())
+        z_next_list.append(z_next[0].detach().cpu())
+        mu_old_list.append(mu[0].detach().cpu())
+        logp_old_list.append(old_logprob[0].detach().cpu() if old_logprob is not None else None)
         z_t = z_next
     crop = vae_decoder(z_t).float().clamp(0, 1)
     if crop.ndim != 4 or crop.shape[:2] != (1, 3) or not torch.isfinite(crop).all():
         raise ValueError("The VAE decoder must return a finite [1, 3, H, W] image")
     return {
         "edited_crop": crop[0], "t_steps": t_steps, "z_t_list": z_t_list,
-        "z_next_list": z_next_list, "logp_old_list": logp_old_list,
+        "z_next_list": z_next_list, "logp_old_list": logp_old_list, "mu_old_list": mu_old_list,
         "strata_indices": sample_4_strata_indices(num_steps, rng=random.Random(seed)),
     }
 
 
 class FluxEditor:
     def __init__(self, pipeline, num_steps=50, eta=0.35, cfg_scale=3.5):
+        if getattr(pipeline, 'config', {}).get('is_distilled', False) or getattr(pipeline.transformer.config, 'guidance_embeds', False):
+            raise ValueError('Flow-SDE requires an undistilled Klein Base model with external classifier-free guidance')
         self.pipeline = pipeline
         self.transformer = pipeline.transformer
         self.vae = pipeline.vae
@@ -76,13 +80,15 @@ class FluxEditor:
 
     @classmethod
     def from_pretrained(
-        cls, model_id="black-forest-labs/FLUX.2-klein-9B", device="cuda",
+        cls, model_id="black-forest-labs/FLUX.2-klein-base-9B", device="cuda",
         dtype=torch.bfloat16, adapter_path=None, trainable=False,
     ):
         from diffusers import Flux2KleinPipeline
         from peft import LoraConfig
 
         dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
+        if Flux2KleinPipeline.load_config(model_id).get('is_distilled', False):
+            raise ValueError('Use FLUX.2-klein-base-9B for the 50-step SFT/Flow-SDE pipeline')
         pipeline = Flux2KleinPipeline.from_pretrained(model_id, torch_dtype=dtype).to(device)
         pipeline.transformer.requires_grad_(False).eval()
         if adapter_path:
@@ -160,7 +166,7 @@ class FluxEditor:
             raise ValueError("An RGB image is required")
         if not torch.isfinite(image).all() or image.min() < 0 or image.max() > 1:
             raise ValueError("Image values must be finite and within [0, 1]")
-        scale = max(1, math.ceil(16 / min(image.shape[-2:])))
+        scale = max(1, math.ceil((2 ** len(self.vae.config.block_out_channels)) / min(image.shape[-2:])))
         if scale > 1:
             image = F.interpolate(image.float(), scale_factor=scale, mode="bilinear", align_corners=False)
         image = image.to(device=self.device, dtype=self.vae.dtype) * 2 - 1
@@ -182,9 +188,30 @@ class FluxEditor:
         latent = latent.reshape(batch, channels // 4, 2, 2, height, width)
         latent = latent.permute(0, 1, 4, 2, 5, 3).reshape(batch, channels // 4, 2 * height, 2 * width)
         image = (self.vae.decode(latent.to(dtype=self.vae.dtype), return_dict=False)[0].float() + 1) / 2
-        if output_size is not None and image.shape[-2:] != tuple(output_size):
-            image = F.interpolate(image, size=output_size, mode="bilinear", align_corners=False)
+        if output_size is not None:
+            scale = max(1, math.ceil((2 ** len(self.vae.config.block_out_channels)) / min(output_size)))
+            height, width = (int(size) * scale for size in output_size)
+            if image.shape[-2] < height or image.shape[-1] < width:
+                image = F.pad(image, (0, max(0, width - image.shape[-1]), 0, max(0, height - image.shape[-2])), mode="replicate")
+            image = image[:, :, :height, :width]
+            if scale > 1:
+                image = F.interpolate(image, size=output_size, mode="bilinear", align_corners=False)
         return image.clamp(0, 1)
+
+    def encode_mask(self, mask, latent):
+        if not torch.all((mask == 0) | (mask == 1)) or not mask.any():
+            raise ValueError("The editable mask must be binary and nonempty")
+        stride = 2 ** len(self.vae.config.block_out_channels)
+        scale = max(1, math.ceil(stride / min(mask.shape[-2:])))
+        mask = mask.to(device=self.device, dtype=torch.float32)
+        if scale > 1:
+            mask = F.interpolate(mask, scale_factor=scale, mode="nearest")
+        height, width = (size * stride for size in latent.shape[-2:])
+        mask = F.pad(mask, (0, max(0, width - mask.shape[-1]), 0, max(0, height - mask.shape[-2])), mode="replicate")
+        mask = F.interpolate(mask[:, :, :height, :width], size=latent.shape[-2:], mode="nearest")
+        if not mask.any():
+            raise ValueError("The edit mask disappears at latent resolution")
+        return mask
 
     @torch.no_grad()
     def encode_text(self, instruction):
@@ -205,12 +232,7 @@ class FluxEditor:
                 mask = mask.unsqueeze(0)
             if mask.ndim != 3 or mask.shape[0] != 1 or mask.shape[-2:] != image.shape[-2:]:
                 raise ValueError("The edit mask must match the full canvas")
-            latent_mask = F.interpolate(
-                self._crop(mask, action).unsqueeze(0).float().to(self.device),
-                size=z_src.shape[-2:], mode="nearest",
-            )
-            if not torch.all((latent_mask == 0) | (latent_mask == 1)) or not latent_mask.any():
-                raise ValueError("The editable mask must be binary and nonempty")
+            latent_mask = self.encode_mask(self._crop(mask, action).unsqueeze(0), z_src)
         return {
             "z_src": z_src, "text_embeds": self.encode_text(action.instruction),
             "null_text_embeds": self.encode_text(""), "mask_latent": latent_mask,
@@ -227,11 +249,7 @@ class FluxEditor:
             mask = mask.unsqueeze(0)
         if mask.shape != (z_src.shape[0], 1, *source.shape[-2:]):
             raise ValueError("The SFT mask must match the source image")
-        if not torch.all((mask == 0) | (mask == 1)) or not mask.any():
-            raise ValueError("The SFT edit mask must be binary and nonempty")
-        latent_mask = F.interpolate(mask.to(device=self.device, dtype=torch.float32), size=z_src.shape[-2:], mode="nearest")
-        if not latent_mask.any():
-            raise ValueError("The edit mask disappears at latent resolution")
+        latent_mask = self.encode_mask(mask, z_src)
         return {"z_src": z_src, "z_0": z_0, "text_embeds": self.encode_text(instruction), "mask_latent": latent_mask}
 
     @torch.no_grad()

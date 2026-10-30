@@ -42,6 +42,27 @@ def parse_controller_action(text, node, failure_mode="attribute_error"):
     return ControllerAction(op=op, box=box, instruction=instruction.strip())
 
 
+
+def bounded_instruction(text, tokenizer):
+    original = text.strip()
+    text = original
+    suffix = " Preserve the identity, position, shape, colors, lighting and texture of every unrelated object. Modify only the requested region and keep all satisfied requirements intact."
+    for _ in range(8):
+        if len(tokenizer.encode(text, add_special_tokens=False)) >= 80:
+            break
+        text += suffix
+    encoded = tokenizer.encode(text, add_special_tokens=False)
+    limit = min(len(encoded), 120)
+    text = tokenizer.decode(encoded[:limit], skip_special_tokens=True).strip()
+    while len(tokenizer.encode(text, add_special_tokens=False)) > 120 and limit > 80:
+        limit -= 1
+        text = tokenizer.decode(encoded[:limit], skip_special_tokens=True).strip()
+    count = len(tokenizer.encode(text, add_special_tokens=False))
+    if not 80 <= count <= 120:
+        raise ValueError("Tokenizer cannot produce an instruction within 80–120 tokens")
+    return text, count, text != original
+
+
 class Controller(Planner):
     default_model_id = "Qwen/Qwen3.5-9B"
 
@@ -100,11 +121,13 @@ class Controller(Planner):
         text = self.processor.decode(action_tokens[0], skip_special_tokens=True)
         failure = classify_failure_mode(dag, target_node_id, state.scores, detected_count)
         action = parse_controller_action(text, dag.nodes[target_node_id], failure)
+        action.instruction, instruction_tokens, repaired = bounded_instruction(action.instruction, self.processor.tokenizer)
         full = append_tokens(inputs, action_tokens)
         action_mask = torch.zeros((1, generated.shape[1] - 1), device=device)
         action_mask[:, length - 1:] = 1.0
         return {"action": action, "inputs": full, "token_ids": generated, "action_mask": action_mask,
-                "text": text, "temperature": temperature if temperature > 0 else 1.0}
+                "text": text, "temperature": temperature if temperature > 0 else 1.0,
+                "instruction_tokens": instruction_tokens, "instruction_repaired": repaired}
 
     def forward_sample(self, sample, action_only=False):
         self.model.train(torch.is_grad_enabled())
@@ -112,7 +135,9 @@ class Controller(Planner):
             if isinstance(module, torch.nn.Dropout):
                 module.eval()
         keep = int(sample["action_mask"].sum()) + 1 if action_only else 0
-        return self.model(**sample["inputs"], use_cache=False, logits_to_keep=keep).logits / sample.get("temperature", 1.0)
+        device = next(self.model.parameters()).device
+        inputs = {key: value.to(device) if torch.is_tensor(value) else value for key, value in sample["inputs"].items()}
+        return self.model(**inputs, use_cache=False, logits_to_keep=keep).logits / sample.get("temperature", 1.0)
 
     def sft_batch(self, records):
         examples = []
@@ -135,6 +160,7 @@ class Controller(Planner):
             if not isinstance(action, ControllerAction):
                 action = parse_controller_action(action, dag.nodes[target],
                          classify_failure_mode(dag, target, state.scores, record.get("detected_count", 1)))
+            action = ControllerAction(action.op, action.box, bounded_instruction(action.instruction, self.processor.tokenizer)[0])
             examples.append((self.messages(state, dag, target, record.get("detected_count", 1)),
                              json.dumps(asdict(action), ensure_ascii=False)))
         return teacher_forced_batch(self, examples)

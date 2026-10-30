@@ -28,6 +28,9 @@ class ReDAGConfig:
     clip_eps_edit: float = 0.2
     gamma_anchor: float = 0.001
     lr_rl_editor: float = 1e-05
+    ppo_epochs: int = 2
+    target_kl_ctrl: float = 0.02
+    target_kl_edit: float = 0.02
 
     def __post_init__(self):
         import math
@@ -40,5 +43,7 @@ class ReDAGConfig:
             raise ValueError('Invalid group or replay sizes')
         if self.reward_scale_s0 <= 0 or self.sde_eta <= 0 or self.adv_clip_max <= 0 or self.delta_noise < 0:
             raise ValueError('Invalid reward or diffusion scales')
+        if type(self.ppo_epochs) is not int or self.ppo_epochs < 1 or min(self.target_kl_ctrl, self.target_kl_edit) <= 0:
+            raise ValueError('Invalid PPO passes or KL limits')
         if self.feather_px < 0 or self.step_cost < 0 or self.protection_lambda < 0:
             raise ValueError('Costs and feather width cannot be negative')

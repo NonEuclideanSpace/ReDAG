@@ -28,6 +28,8 @@ class ConditionNode:
     weight: float = 1.0
     threshold: float = 0.70
     expected_count: Optional[int] = None
+    scope: Literal['local', 'global', 'unknown'] = 'unknown'
+    depends_on: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.node_id or not self.question.strip():
@@ -41,6 +43,11 @@ class ConditionNode:
             validate_box(self.bbox)
         if self.expected_count is not None and (type(self.expected_count) is not int or self.expected_count < 0):
             raise ValueError('Expected count must be a nonnegative integer')
+        if self.scope not in ('local', 'global', 'unknown'):
+            raise ValueError('Condition scope must be local, global or unknown')
+        if not isinstance(self.depends_on, (list, tuple)) or any(not isinstance(nid, str) or not nid for nid in self.depends_on):
+            raise ValueError('Condition dependencies must be node IDs')
+        self.depends_on = list(dict.fromkeys(self.depends_on))
 
 
 @dataclass
@@ -60,6 +67,10 @@ class ConditionDAG:
                     raise ValueError('Invalid graph edge')
         for u, v in self.comp_edges + self.supp_edges:
             parents[v].add(u)
+        for nid, node in self.nodes.items():
+            if any(dep not in self.nodes or dep == nid for dep in node.depends_on):
+                raise ValueError('Condition dependencies must reference other existing nodes')
+            parents[nid].update(node.depends_on)
         tuple(TopologicalSorter(parents).static_order())
 
     @property
