@@ -90,9 +90,10 @@ def instruction_prompt(session, inventory):
             '(t1_1, t1_2, ...). A removal becomes a prohibition ("Is the image free of <object>?"); a replacement becomes the new '
             "object's presence plus a prohibition of the old one. If a later request contradicts an earlier condition, list the "
             'earlier id under "superseded": {"<turn>": [ids]}.\n'
-            f'Inventory conditions: up to {inventory} more facts clearly visible in the starting image that none of the requests '
-            'changes (object presence, colors, materials, counts, spatial relations, scene style), ids i1, i2, ... Skip anything a '
-            'request modifies or removes. Edit conditions may depend on inventory nodes.\n'
+            f'Inventory conditions: {max(1, inventory * 2 // 3)} to {inventory} more facts clearly visible in the starting image that '
+            'none of the requests changes (object presence, colors, materials, counts, spatial relations, scene style), ids i1, '
+            'i2, ... (fewer only if the image really shows fewer clear facts; they let sessions reach 20 or 30 conditions). Skip '
+            'anything a request modifies or removes. Edit conditions may depend on inventory nodes.\n'
             + INSTRUCTION_RULES.replace('"int_edges": [...]}', '"int_edges": [...], "superseded": {}}'))
 
 
