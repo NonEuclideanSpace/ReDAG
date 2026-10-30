@@ -258,6 +258,7 @@ def add_runtime_arguments(parser):
     parser.add_argument('--planner_model', default='Qwen/Qwen3.8-27B')
     parser.add_argument('--planner_adapter')
     parser.add_argument('--planner_device')
+    parser.add_argument('--num_denoise_steps', type=int, help='editor sampling steps (default: config value, 50)')
     return parser
 
 
@@ -270,6 +271,8 @@ def load_runtime(args, trainable_controller=False, trainable_editor=False):
     controller = Controller.from_pretrained(args.controller_model, args.device, dtype, args.controller_adapter, trainable_controller)
     edit_device, verify_device = args.editor_device or args.device, args.verifier_device or args.device
     editor = FluxEditor.from_pretrained(args.editor_model, edit_device, torch.float32 if edit_device == 'cpu' else torch.bfloat16, args.editor_adapter, trainable_editor)
+    if getattr(args, 'num_denoise_steps', None):
+        editor.num_steps = args.num_denoise_steps
     verifier = TwoStageVerifier(load_vlm_scorer(args.verifier_model, verify_device, torch.float32 if verify_device == 'cpu' else torch.bfloat16))
     grounder = Grounder.from_pretrained(args.detector_model, args.sam_model, verify_device)
     return ReDAGHarness(verifier, grounder), controller, editor

@@ -36,10 +36,11 @@ def main():
         sources[name] = str(Path(sources[name]).resolve())
     started = time.perf_counter()
     harness, controller, editor = load_runtime(args, trainable_controller=True, trainable_editor=True)
+    steps = {'num_denoise_steps': args.num_denoise_steps} if args.num_denoise_steps else {}
     history = train_alternating(harness, controller, editor, records, dev_records, args.output,
                       rounds=args.rounds, epochs=args.epochs, batch_size=args.batch_size,
                       reward_mode=args.reward_mode, rollout_steps=args.rollout_steps, seed=args.seed,
-                      config=ReDAGConfig(ppo_epochs=args.ppo_epochs), sources=sources)
+                      config=ReDAGConfig(ppo_epochs=args.ppo_epochs, **steps), sources=sources)
     runtime = dict(wall_seconds_including_model_load=time.perf_counter() - started,
                    optimizer_updates=sum(row['optimizer_updates'] for row in history), training_steps=len(history))
     (Path(args.output) / 'runtime.json').write_text(json.dumps(runtime, indent=2))

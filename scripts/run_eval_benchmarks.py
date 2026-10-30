@@ -14,6 +14,8 @@ from redag.learn.sft_trainer import read_records
 from redag.models.planner import Planner, preserve_previous_conditions
 from redag.verify.verifier import load_vlm_scorer, export_view, apply_annotations, apply_ratings
 
+STAGES = ('zero_shot', 'sft', 'ctrl_rl', 'edit_rl', 'alternating_rl')
+
 
 def export_case(state, dag, trace, folder, identifier, group, budget, config):
     views, steps = {}, []
@@ -45,7 +47,13 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--allow-small-dataset', action='store_true')
     parser.add_argument('--exp1_modes', nargs='+', choices=('flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates', 'redag_full'), default=('flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates', 'redag_full'))
+    parser.add_argument('--stages', nargs='+', choices=STAGES, help='experiment 3: run only these stages (merge parts with scripts/merge_eval_results.py)')
+    parser.add_argument('--shard', type=int, default=0, help='run records with index %% num_shards == shard')
+    parser.add_argument('--num_shards', type=int, default=1)
     args = parser.parse_args()
+    if not 0 <= args.shard < args.num_shards:
+        parser.error('--shard must be in [0, num_shards)')
+    partial = args.num_shards > 1 or bool(args.stages)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     if args.audit_model and args.audit_model == args.verifier_model:
         parser.error('Proxy auditor and training verifier must use different checkpoints')
@@ -72,7 +80,11 @@ def main():
                             raise ValueError('Missing stage adapter directory')
             if any(stages['zero_shot'].values()) or any(not all(v.values()) for k, v in stages.items() if k != 'zero_shot') or len({json.dumps(v, sort_keys=True) for v in stages.values()}) != 5:
                 raise ValueError('Zero shot must be base-only and all five stage pairs distinct')
+            if args.stages:
+                stages = {k: v for k, v in stages.items() if k in args.stages}
         result = {'exp_id': args.exp_id, 'diagnostic_only': args.allow_small_dataset, 'evaluation_cases': [], 'human_ratings': None, 'human_evaluation_status': 'pending', 'budgets': {'verification': args.verification_budget, 'generation': args.generation_budget}}
+        if partial:
+            result['part'] = {'shard': args.shard, 'num_shards': args.num_shards, 'stages': list(stages), 'seed': args.seed}
         if args.exp_id == 2:
             if not args.training_logs and not args.allow_small_dataset:
                 parser.error('Experiment 2 requires actual --training_logs')
@@ -113,19 +125,21 @@ def main():
                 for mode in (args.exp1_modes if args.exp_id == 1 else ('redag_full',)):
                     harness.mode, counts = mode, defaultdict(int)
                     for index, record in enumerate(records):
+                        if index % args.num_shards != args.shard:
+                            continue
                         for seed in (range(3) if args.exp_id == 3 else (0,)):
                             state, dag, trace = run_record(record, harness, controller, editor, args.max_steps, args.seed + seed, planner=planner)
                             k = len(dag.nodes)
                             counts[k] += 1
                             if not args.allow_small_dataset and k not in (10, 20, 30):
                                 raise ValueError('Main evaluations require final K=10/20/30')
-                            identifier = f'case_{serial:06d}'
+                            identifier = f'case_s{args.shard}_{stage}_{serial:06d}' if partial else f'case_{serial:06d}'
                             serial += 1
                             case = export_case(state, dag, trace, folder, identifier, f'{stage}/{mode}/{k}', harness.last_run, harness.config)
                             result['evaluation_cases'].append(case)
                             saved[index, seed][stage] = case['views'][case['final']]['image']
                             descriptions[index, seed] = {'requirements': [node.question for node in dag.nodes.values()], 'source': str(record['image']) if isinstance(record['image'], (str, Path)) else None}
-                    if not args.allow_small_dataset and any(counts[k] < (300 if args.exp_id == 3 else 100) for k in (10, 20, 30)):
+                    if not args.allow_small_dataset and not partial and any(counts[k] < (300 if args.exp_id == 3 else 100) for k in (10, 20, 30)):
                         raise ValueError('Each K tier requires 100 sessions, with three seeds for experiment 3')
             del harness, controller, editor
             gc.collect()
@@ -135,7 +149,10 @@ def main():
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        if args.exp_id == 3:
+        if args.exp_id == 3 and partial:  # blind pairs are drawn after merging every part
+            result['final_views'] = {f'{i}:{s}': images for (i, s), images in saved.items()}
+            result['descriptions'] = {f'{i}:{s}': value for (i, s), value in descriptions.items()}
+        elif args.exp_id == 3:
             rng, pairs, key = random.Random(args.seed), [], []
             for identity, images in rng.sample(list(saved.items()), min(200, len(saved))):
                 names = rng.sample(list(stages), 2)
