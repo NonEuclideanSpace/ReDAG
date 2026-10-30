@@ -119,8 +119,8 @@ def main():
                     extract_archive(target / filename, target / filename.replace('.tar.gz', ''))
     failed = [f for r in report.values() for f, s in r['files'].items() if s == 'failed']
     log('done' if not failed else f'{len(failed)} files failed; rerun the same command to resume')
-    if not any(p.exists() for p in (RAW / 'lgbench').glob('*')):
-        log('note: LGBench has no public download; place its JSON/JSONL under data/raw/lgbench/ if you have it')
+    if not (RAW / 'benchmarks' / 'lgbench' / 't2i_1000.json').exists():
+        log('note: LGBench (t2i_1000.json, i2i_1000.json, i2i source images) is expected under data/raw/benchmarks/lgbench/')
 
 
 if __name__ == '__main__':

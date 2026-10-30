@@ -112,6 +112,7 @@ def main():
     parser.add_argument('--dir', default=str(FINAL))
     parser.add_argument('--images', choices=('sample', 'all'), default='sample')
     parser.add_argument('--allow_missing_canvases', action='store_true')
+    parser.add_argument('--only', nargs='+', help='check only files whose name contains one of these strings')
     args = parser.parse_args()
     from redag.learn.sft_trainer import read_records
     folder, report, failed = Path(args.dir), {}, False
@@ -121,6 +122,8 @@ def main():
               ('eval_main.jsonl', lambda r, i: check_eval(r, i, True)), ('eval_credit.jsonl', lambda r, i: check_eval(r, i, False))]
     for pattern, check in checks:
         for path in sorted(folder.glob(pattern)):
+            if args.only and not any(part in path.name for part in args.only):
+                continue
             rows = read_records(path)
             errors = check(rows, args.images)
             if args.allow_missing_canvases:
@@ -130,7 +133,7 @@ def main():
             failed |= bool(errors)
             log(f"{path.name}: {len(rows)} rows, {len(errors)} problems" + (f' e.g. {errors[0]}' if errors else ''))
     train, dev = folder / 'rl_train.jsonl', folder / 'rl_dev.jsonl'
-    if train.exists() and dev.exists():
+    if train.exists() and dev.exists() and (not args.only or any(part in 'rl_train.jsonl rl_dev.jsonl' for part in args.only)):
         a, b = read_records(train), read_records(dev)
         overlap = {r['id'] for r in a} & {r['id'] for r in b} | {r['image'] for r in a} & {r['image'] for r in b}
         report['rl_train_dev_disjoint'] = not overlap

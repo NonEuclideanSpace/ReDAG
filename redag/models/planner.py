@@ -126,6 +126,23 @@ def teacher_forced_batch(owner, examples):
     return (torch.cat([F.pad(x, (0, 0, 0, width - x.shape[1])) for x in logits]),
             torch.cat([F.pad(x, (0, width - x.shape[1]), value=-100) for x in labels]))
 
+LORA_PATTERN = (r".*language_model\.layers\.\d+\.(self_attn\.(q_proj|k_proj|v_proj|o_proj)"
+                r"|linear_attn\.(in_proj_\w+|out_proj)|mlp\.(gate_proj|up_proj|down_proj))")
+
+
+def lora_target_modules(model):
+    """LoRA on every projection of every language-model layer.
+
+    Qwen3.5-family models interleave three Gated-DeltaNet (linear attention) layers with one full-attention
+    layer, so the usual q/k/v/o targets would adapt only a quarter of the decoder.  The regex covers both
+    layer kinds and the MLPs but never the vision tower or the LM head; unknown layouts fall back to q/k/v/o.
+    """
+    pattern = re.compile(LORA_PATTERN)
+    if any(isinstance(module, torch.nn.Linear) and pattern.fullmatch(name) for name, module in model.named_modules()):
+        return LORA_PATTERN
+    return ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+
 class Planner:
     default_model_id = "Qwen/Qwen3.8-27B"
 
@@ -158,7 +175,7 @@ class Planner:
             model = PeftModel.from_pretrained(model, adapter_path, is_trainable=trainable)
         elif trainable:
             model = get_peft_model(model, LoraConfig(r=16, lora_alpha=32, lora_dropout=0.0,
-                                  target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                                  target_modules=lora_target_modules(model),
                                   bias="none", task_type="CAUSAL_LM"))
         if trainable:
             model.enable_input_require_grads()

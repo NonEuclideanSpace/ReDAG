@@ -79,3 +79,53 @@ def test_heuristics_cover_every_mode():
         graph, statements, node_turn, _, _ = heuristic(session, mode)
         preserve_previous_conditions(graph, None)
         assert json.dumps(graph) and set(node_turn) == {n['node_id'] for n in graph['nodes']}
+
+
+def test_magicbrush_converter_on_synthetic_parquet(tmp_path):
+    """Two-turn session in MagicBrush's parquet layout: alpha-hole mask, then white mask; 4:3 source, square target."""
+    import io
+    import os
+    import subprocess
+    pa = pytest.importorskip('pyarrow')
+    import pyarrow.parquet as pq
+    from PIL import Image, ImageDraw
+    root = Path(__file__).resolve().parents[1]
+
+    def png(image):
+        buffer = io.BytesIO()
+        image.save(buffer, format='PNG')
+        return {'bytes': buffer.getvalue(), 'path': None}
+
+    source = Image.new('RGB', (80, 60), (40, 120, 200))
+    ImageDraw.Draw(source).rectangle((5, 5, 30, 25), fill=(250, 250, 0))
+    target1 = source.resize((128, 128))
+    ImageDraw.Draw(target1).rectangle((70, 70, 110, 110), fill=(255, 0, 0))
+    mask1 = target1.convert('RGBA')
+    ImageDraw.Draw(mask1).rectangle((66, 66, 114, 114), fill=(0, 0, 0, 0))  # DALL-E style transparent hole
+    target2 = target1.copy()
+    ImageDraw.Draw(target2).ellipse((10, 60, 40, 90), fill=(0, 255, 0))
+    mask2 = Image.new('L', (128, 128), 0)
+    ImageDraw.Draw(mask2).rectangle((6, 56, 44, 94), fill=255)  # white = editable
+    image_type = pa.struct([('bytes', pa.binary()), ('path', pa.string())])
+    table = pa.table({'img_id': ['777', '777'], 'turn_index': pa.array([1, 2], pa.int32()),
+                      'source_img': pa.array([png(source), png(target1)], image_type),
+                      'mask_img': pa.array([png(mask1), png(mask2)], image_type),
+                      'instruction': ['make a red square', 'add a green ball'],
+                      'target_img': pa.array([png(target1), png(target2)], image_type)})
+    raw = tmp_path / 'raw' / 'magicbrush' / 'data'
+    raw.mkdir(parents=True)
+    pq.write_table(table, raw / 'dev-00000-of-00001.parquet')
+    env = dict(os.environ, REDAG_DATA=str(tmp_path))
+    subprocess.run([sys.executable, str(root / 'scripts' / 'data' / 'prep_magicbrush.py'), '--splits', 'dev'], check=True, env=env,
+                   capture_output=True)
+    turns = [json.loads(l) for l in (tmp_path / 'processed' / 'magicbrush' / 'turns_dev.jsonl').read_text().splitlines()]
+    assert [t['mask_rule'] for t in turns] == ['alpha', 'white'] and turns[0]['align'] == 'resize'
+    assert turns[1]['align'] == 'identity' and all(t['outside_err'] < 0.02 for t in turns)
+    box = turns[0]['edit_box']
+    assert abs(box[0] - 66 / 128) < 0.02 and abs(box[2] - 115 / 128) < 0.02
+    sessions = [json.loads(l) for l in (tmp_path / 'processed' / 'sessions' / 'magicbrush_dev.jsonl').read_text().splitlines()]
+    assert len(sessions) == 1 and [t['turn'] for t in sessions[0]['turns']] == [1, 2]
+    final = tmp_path / 'final' / 'editor_sft_dev.jsonl'
+    rows = [json.loads(l) for l in final.read_text().splitlines()]
+    sizes = {Image.open(final.parent / rows[0][k]).size for k in ('source', 'target', 'mask')}
+    assert len(rows) == 2 and len(sizes) == 1
