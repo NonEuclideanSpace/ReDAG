@@ -156,7 +156,7 @@ def train_sft(model, records, output, kind, epochs=1, batch_size=1, learning_rat
     return result
 
 
-def collect_controller_rs(records, harness, controller, editor, output, seed=42):
+def collect_controller_rs(records, harness, controller, editor, output, seed=42, index_offset=0):
     import json
     from dataclasses import asdict
     from pathlib import Path
@@ -179,8 +179,9 @@ def collect_controller_rs(records, harness, controller, editor, output, seed=42)
         output.write_text(''.join(line + '\n' for line in kept), encoding='utf-8')
     from redag.progress import report
     with output.open('a', encoding='utf-8') as stream:
-        for index, record in enumerate(records):
-            report(index, len(records), 'states')
+        for position, record in enumerate(records):
+            index = index_offset + position
+            report(position, len(records), 'states')
             identifier = str(record.get('id', f'state_{index:06d}'))
             if identifier in done:
                 continue
