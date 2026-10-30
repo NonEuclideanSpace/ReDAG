@@ -958,7 +958,11 @@ def marker_names(s):
 
 
 def rsync(src, dst, ssh, filters, dry=False):
-    cmd = ['rsync', '-a', '--update', '--partial', '--timeout=120', '-e', ssh]
+    # --modify-window=-1: compare modification times to the nanosecond.  With the default (whole seconds) a file that
+    # its writer appended to within the second after the other direction copied it looked equally old but different
+    # in size, so the stale copy replaced it; a writer that keeps the file open (SFT/RL metrics) then wrote into the
+    # replaced inode and its later lines were lost (editor SFT metrics stopped at step 7159 of 8796).
+    cmd = ['rsync', '-a', '--update', '--modify-window=-1', '--partial', '--timeout=120', '-e', ssh]
     cmd += [f'--exclude={x}' for x in SYNC_EXCLUDE] + filters + [src, dst]
     if dry:
         cmd.insert(1, '-n')
