@@ -231,7 +231,7 @@ def check_editor(path):
     expected = editor._crop(image, action).shape
     assert tuple(crop.shape) == tuple(expected), (crop.shape, expected)
     rendered = editor.render(image, action, seed=5)
-    assert torch.allclose(rendered, crop)
+    assert torch.allclose(rendered.cpu().float(), crop.cpu().float(), atol=1e-3)  # render() returns on the image's device
     editor.train()
     loss, metrics = compute_editor_rl_loss(editor.dit_model, [trajectory], **conditioning, advantages=torch.tensor([0.7], device=editor.device),
                                            lora_params_current=editor.lora_parameters(),
