@@ -120,6 +120,9 @@ def main():
         target.mkdir(parents=True, exist_ok=True)
         if name == 'corebench_images':
             files = [(f'{model}.tar.gz', None) for model in args.archives]
+        elif name == 'lgbench':  # fixed layout; a recursive listing of 3,000 files pages through huggingface.co itself
+            files = [('t2i_1000.json', None), ('i2i_1000.json', None)] + [
+                (f'i2i_source_images/task_{i:04d}/{f}', None) for i in range(1000) for f in ('source_image.png', 'metadata.json', 'source_prompt.txt')]
         else:
             files = listing(repo_id, folder)
         if name in KEEP:
