@@ -59,3 +59,37 @@ def test_cut_off_answers_get_a_compact_json_retry_instruction():
     assert not ag.cut_off('{"nodes": []}\n') and not ag.cut_off('```json\n{"nodes": []}\n```')
     assert 'single line' in ag.FIELD_RULES and 'single-line' in ag.CUT_OFF
     assert '"superseded": {}}' in ag.FIELD_RULES.replace('"int_edges": [...]}', '"int_edges": [...], "superseded": {}}')
+
+
+def test_generate_reports_steps_and_answer_lengths(monkeypatch):
+    import torch
+    import annotate_graphs as ag
+    logged = []
+    monkeypatch.setattr(ag, 'log', logged.append)
+
+    class Processor:
+        def apply_chat_template(self, conversation, **kwargs):
+            return conversation[-1]['content']
+
+        def __call__(self, text, padding, return_tensors, images=None):
+            return {'input_ids': torch.ones((len(text), 5), dtype=torch.long), 'attention_mask': torch.ones((len(text), 5))}
+
+        def batch_decode(self, answers, skip_special_tokens):
+            return [' '.join(str(int(t)) for t in row if int(t) != 0) for row in answers]
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.generation_config = type('C', (), {'pad_token_id': 0})()
+
+        def generate(self, input_ids, attention_mask, max_new_tokens, do_sample):
+            answers = torch.tensor([[7, 7, 7, 0], [8, 8, 8, 8]])  # the second answer hits the limit of 4
+            return torch.cat([input_ids, answers], dim=1)
+
+    planner = type('P', (), {'processor': Processor(), 'model': Model()})()
+    texts = ag.generate(planner, [[{'role': 'user', 'content': 'a'}], [{'role': 'user', 'content': 'b'}]], [None, None], 4)
+    assert texts == ['7 7 7', '8 8 8 8']
+    assert 'median 4, max 4, 1 at the limit' in logged[-1] and '4 steps' in logged[-1]
+    rules = ag.INSTRUCTION_RULES
+    assert 'statement' not in rules and '"int_edges": [...]}' in rules

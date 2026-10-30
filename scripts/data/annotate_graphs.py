@@ -18,6 +18,7 @@ the downstream pipeline is smoke-tested in no-GPU mode.
 import argparse
 import json
 import re
+import time
 from pathlib import Path
 
 from _common import PROC, append_jsonl, build_dag, clean_node, done_ids, iter_jsonl, log, sanitize_graph, tighten_scopes
@@ -39,6 +40,9 @@ Edges: comp_edges [entity id, dependent attribute/relation id]; supp_edges [supp
 (e.g. table -> cup on the table); int_edges [id, id] for similar or overlapping objects that an edit of one may disturb.
 No dependency cycles. Return {"nodes": [...], "comp_edges": [...], "supp_edges": [...], "int_edges": [...]}
 Write the JSON compactly on a single line, without indentation or line breaks: large graphs must fit the answer length limit."""
+# MagicBrush turn prompts are the users' own instructions (build_sets.turn_prompt), so statements would be unused tokens
+INSTRUCTION_RULES = FIELD_RULES.replace(', expected_count, statement.', ', expected_count.').replace(
+    '- statement: the requirement as one short declarative sentence.\n', '')
 CUT_OFF = ('the answer was cut off before the JSON was complete (answer length limit); write the complete graph again as '
            'compact single-line JSON without indentation or line breaks, with short statements')
 
@@ -81,7 +85,7 @@ def instruction_prompt(session, inventory):
             f'Inventory conditions: up to {inventory} more facts clearly visible in the starting image that none of the requests '
             'changes (object presence, colors, materials, counts, spatial relations, scene style), ids i1, i2, ... Skip anything a '
             'request modifies or removes. Edit conditions may depend on inventory nodes.\n'
-            + FIELD_RULES.replace('"int_edges": [...]}', '"int_edges": [...], "superseded": {}}'))
+            + INSTRUCTION_RULES.replace('"int_edges": [...]}', '"int_edges": [...], "superseded": {}}'))
 
 
 def to_graph(value, session, mode):
@@ -221,9 +225,17 @@ def generate(planner, conversations, images, max_new_tokens):
     inputs = planner.processor(**kwargs)
     device = next(planner.model.parameters()).device
     inputs = {k: v.to(device) if torch.is_tensor(v) else v for k, v in inputs.items()}
+    started = time.time()
     with torch.no_grad():
         out = planner.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
-    return planner.processor.batch_decode(out[:, inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+    answers = out[:, inputs['input_ids'].shape[1]:]
+    steps, seconds = answers.shape[1], time.time() - started
+    pad = getattr(planner.model.generation_config, 'pad_token_id', None)
+    lengths = sorted(int(n) for n in ((answers != pad).sum(1) if pad is not None else torch.full((len(texts),), steps)))
+    log(f'  generate: {len(texts)} answers, prompt {inputs["input_ids"].shape[1]} tokens, {steps} steps in {seconds:.0f}s '
+        f'({1000 * seconds / max(steps, 1):.0f} ms/step); answer tokens median {lengths[len(lengths) // 2]}, max {lengths[-1]}, '
+        f'{sum(n >= max_new_tokens for n in lengths)} at the limit')
+    return planner.processor.batch_decode(answers, skip_special_tokens=True)
 
 
 def messages(session, mode, inventory, feedback=None, answer=None):
