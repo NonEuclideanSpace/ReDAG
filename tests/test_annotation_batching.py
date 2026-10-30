@@ -93,3 +93,33 @@ def test_generate_reports_steps_and_answer_lengths(monkeypatch):
     assert 'median 4, max 4, 1 at the limit' in logged[-1] and '4 steps' in logged[-1]
     rules = ag.INSTRUCTION_RULES
     assert 'statement' not in rules and '"int_edges": [...]}' in rules
+
+
+def test_grouped_decode_attention_matches_sdpa():
+    import torch
+    import annotate_graphs as ag
+    from transformers.integrations.sdpa_attention import sdpa_attention_forward
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+    original = ALL_ATTENTION_FUNCTIONS['sdpa']
+    try:
+        attention = ag.gqa_decode_attention()
+        assert ALL_ATTENTION_FUNCTIONS['sdpa'] is attention
+        module = type('M', (), {'num_key_value_groups': 6, 'is_causal': True})()
+        torch.manual_seed(0)
+        batch, kv, length, dim = 3, 4, 11, 32
+        key, value = torch.randn(batch, kv, length, dim), torch.randn(batch, kv, length, dim)
+        mask = torch.ones(batch, 1, 1, length, dtype=torch.bool)
+        mask[0, ..., :4] = False  # left padding of different lengths
+        mask[2, ..., :1] = False
+        query = torch.randn(batch, 1, kv * 6, dim).transpose(1, 2)  # (b, heads, 1, d), not contiguous like the model's
+        for m in (mask, None, torch.where(mask, 0.0, float('-inf'))):
+            ours, _ = attention(module, query, key, value, m, scaling=dim ** -0.5)
+            reference, _ = sdpa_attention_forward(module, query, key, value, m, scaling=dim ** -0.5)
+            assert ours.shape == reference.shape == (batch, 1, kv * 6, dim)
+            assert torch.allclose(ours, reference, atol=1e-5)
+        prefill = torch.randn(batch, kv * 6, 5, dim)  # several query tokens: the original path
+        causal = torch.ones(batch, 1, 5, length, dtype=torch.bool).tril(length - 5)
+        assert torch.equal(attention(module, prefill, key, value, causal, scaling=0.1)[0],
+                           sdpa_attention_forward(module, prefill, key, value, causal, scaling=0.1)[0])
+    finally:
+        type(ALL_ATTENTION_FUNCTIONS).register('sdpa', original)

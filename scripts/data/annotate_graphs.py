@@ -206,9 +206,43 @@ def heuristic(session, mode):
     return tighten_scopes(graph), statements, node_turn, {}, []
 
 
+def gqa_decode_attention():
+    """sdpa attention whose decode steps read each key/value head once for all of its query heads.
+
+    With a padding mask (every left-padded batch) transformers' sdpa path calls repeat_kv: each step it copies the whole
+    cache 6x (24 query / 4 key-value heads in the 27B planner) and then reads the copy, ~80% of the decode time at batch
+    40.  Here a decode step instead treats the 6 query heads of a key/value head as 6 query positions of one sdpa call
+    (same mask for all of them, no causal masking among them): same attention, no copy.  Prefill and everything else
+    use the original function."""
+    import torch
+    try:
+        from transformers import AttentionInterface
+    except ImportError:
+        from transformers.modeling_utils import AttentionInterface
+    from transformers.integrations.sdpa_attention import sdpa_attention_forward
+
+    def attention(module, query, key, value, attention_mask, dropout=0.0, scaling=None, **kwargs):
+        groups = getattr(module, 'num_key_value_groups', 1)
+        if (query.shape[2] != 1 or groups == 1 or dropout or kwargs.get('position_bias') is not None
+                or kwargs.get('cache') is not None or kwargs.get('softcap') is not None):
+            return sdpa_attention_forward(module, query, key, value, attention_mask, dropout=dropout, scaling=scaling, **kwargs)
+        batch, heads, _, dim = query.shape
+        grouped = query.reshape(batch, key.shape[1], groups, dim)  # query head h uses key/value head h // groups
+        mask = None if attention_mask is None else attention_mask[..., -1:, :key.shape[2]]
+        out = torch.nn.functional.scaled_dot_product_attention(grouped, key, value, attn_mask=mask, scale=scaling)
+        return out.reshape(batch, 1, heads, dim), None
+
+    AttentionInterface.register('sdpa', attention)
+    return attention
+
+
 def load_model(args):
+    import os
     import torch
     from redag.models.planner import Planner
+    if os.environ.get('ANNOTATE_GQA_DECODE', '1') != '0':
+        gqa_decode_attention()
+        log('decode attention: grouped key/value heads (ANNOTATE_GQA_DECODE=0 restores the repeat_kv path)')
     planner = Planner.from_pretrained(args.model, args.device, torch.bfloat16)
     tokenizer = getattr(planner.processor, 'tokenizer', planner.processor)
     tokenizer.padding_side = 'left'
