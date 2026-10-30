@@ -27,6 +27,9 @@ def main():
     parser.add_argument("--ppo_epochs", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    if (Path(args.output) / 'rl_complete.json').exists():  # finished earlier: nothing to load or train
+        print('already complete:', Path(args.output) / 'rl_complete.json')
+        return
     if not args.controller_adapter or not args.editor_adapter:
         parser.error("Controller and editor SFT adapters are required")
     records, dev_records = read_records(args.data), read_records(args.dev_data)
@@ -42,7 +45,8 @@ def main():
                       reward_mode=args.reward_mode, rollout_steps=args.rollout_steps, seed=args.seed,
                       config=ReDAGConfig(ppo_epochs=args.ppo_epochs, **steps), sources=sources)
     runtime = dict(wall_seconds_including_model_load=time.perf_counter() - started,
-                   optimizer_updates=sum(row['optimizer_updates'] for row in history), training_steps=len(history))
+                   optimizer_updates=sum(row['optimizer_updates'] for row in history), training_steps=len(history),
+                   step_wall_seconds_total=sum(row['step_wall_seconds'] for row in history))
     (Path(args.output) / 'runtime.json').write_text(json.dumps(runtime, indent=2))
 
 

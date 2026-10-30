@@ -46,14 +46,38 @@ def read_records(path):
     return records
 
 
-def train_sft(model, records, output, kind, epochs=1, batch_size=1, learning_rate=None, seed=42):
-    import json
+def epoch_order(count, seed, epoch):
+    """Record order of one epoch: the shuffles of a single Random(seed) applied to a fresh index list every epoch."""
     import random
+    rng, order = random.Random(seed), []
+    for _ in range(epoch + 1):
+        order = list(range(count))
+        rng.shuffle(order)
+    return order
+
+
+def train_sft(model, records, output, kind, epochs=1, batch_size=1, learning_rate=None, seed=42, checkpoint_minutes=20,
+              interrupt_after=None):
+    """Teacher-forced SFT (eq. 17 / 20 / 24), resumable.
+
+    Every checkpoint_minutes and at each epoch end the LoRA weights, optimizer, RNG states and data position are saved
+    to <output>/resume; rerunning the same command continues from there, and a finished run (sft_complete.json)
+    returns at once.  interrupt_after=N is a test hook: stop right after the checkpoint that follows step N.
+    """
+    import json
+    import time
     from pathlib import Path
     from redag.config import ReDAGConfig
+    from redag.learn import checkpoint
+    from redag.progress import report
     from redag.verify.grounder import load_image
     config = ReDAGConfig()
     rate = learning_rate or getattr(config, 'lr_sft_' + kind)
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    complete = output / 'sft_complete.json'
+    if complete.exists():
+        return json.loads(complete.read_text())
     parameters = model.lora_parameters()
     if not parameters or not all(p.requires_grad for p in parameters):
         raise ValueError('SFT requires trainable LoRA parameters')
@@ -64,16 +88,32 @@ def train_sft(model, records, output, kind, epochs=1, batch_size=1, learning_rat
     else:
         model.model.train()
     optimizer = torch.optim.AdamW(parameters, lr=rate, weight_decay=0.0)
-    output = Path(output)
-    output.mkdir(parents=True, exist_ok=True)
-    rng = random.Random(seed)
     torch.manual_seed(seed)
-    step = 0
-    with (output / 'metrics.jsonl').open('w', encoding='utf-8') as log:
-        for epoch in range(epochs):
-            order = list(range(len(records)))
-            rng.shuffle(order)
-            for start in range(0, len(order), batch_size):
+    fingerprint = dict(kind=kind, records=len(records), epochs=epochs, batch_size=batch_size, seed=seed, learning_rate=rate)
+    step, epoch, offset, total = 0, 0, 0, 0.0
+    resumed = checkpoint.load(output)
+    if resumed:
+        state, payload = resumed
+        if state['fingerprint'] != fingerprint:
+            raise ValueError(f'{output}/resume belongs to a different SFT run ({state["fingerprint"]} != {fingerprint}); '
+                             'use a fresh --output or delete that folder')
+        model.load_snapshot(payload['tensors']['model'])
+        optimizer.load_state_dict(payload['optimizer'])
+        checkpoint.set_rng_state(payload['rng'])
+        step, epoch, offset, total = state['step'], state['epoch'], state['offset'], state['loss']
+        print(f'resuming {kind} SFT at step {step} (epoch {epoch}, record {offset})', flush=True)
+    checkpoint.keep_jsonl_rows(output / 'metrics.jsonl', lambda row: row.get('step', -1) < step)
+    total_steps = epochs * -(-len(records) // batch_size)
+    last_save = time.time()
+
+    def save(next_epoch, next_offset):
+        checkpoint.save(output, dict(fingerprint=fingerprint, step=step, epoch=next_epoch, offset=next_offset, loss=total),
+                        tensors={'model': model.snapshot()}, optimizer=optimizer)
+
+    with (output / 'metrics.jsonl').open('a', encoding='utf-8') as log:
+        while epoch < epochs:
+            order = epoch_order(len(records), seed, epoch)
+            for start in range(offset, len(order), batch_size):
                 batch = [records[i] for i in order[start:start + batch_size]]
                 optimizer.zero_grad(set_to_none=True)
                 total = 0.0
@@ -98,8 +138,22 @@ def train_sft(model, records, output, kind, epochs=1, batch_size=1, learning_rat
                 log.write(json.dumps(dict(step=step, epoch=epoch, loss=total)) + '\n')
                 log.flush()
                 step += 1
+                report(step, total_steps, 'steps')
+                stop = interrupt_after is not None and step >= interrupt_after
+                if stop or time.time() - last_save >= checkpoint_minutes * 60:
+                    save(epoch, start + batch_size) if start + batch_size < len(order) else save(epoch + 1, 0)
+                    last_save = time.time()
+                    if stop:
+                        raise checkpoint.Interrupted(f'interrupted after step {step}')
+            epoch, offset = epoch + 1, 0
+            if epoch < epochs:
+                save(epoch, 0)
+                last_save = time.time()
     model.save_adapter(output)
-    return {'steps': step, 'loss': total}
+    result = {'steps': step, 'loss': total}
+    complete.write_text(json.dumps(result))
+    checkpoint.clear(output)
+    return result
 
 
 def collect_controller_rs(records, harness, controller, editor, output, seed=42):
@@ -123,8 +177,10 @@ def collect_controller_rs(records, harness, controller, editor, output, seed=42)
             except (ValueError, KeyError, TypeError):
                 continue
         output.write_text(''.join(line + '\n' for line in kept), encoding='utf-8')
+    from redag.progress import report
     with output.open('a', encoding='utf-8') as stream:
         for index, record in enumerate(records):
+            report(index, len(records), 'states')
             identifier = str(record.get('id', f'state_{index:06d}'))
             if identifier in done:
                 continue

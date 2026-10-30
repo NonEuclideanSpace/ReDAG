@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 
 from _common import log, read_jsonl, write_jsonl
+from redag.progress import report
 
 
 def main():
@@ -40,6 +41,7 @@ def main():
             shutil.copyfile(path, backup)
         rows, kept, dropped = read_jsonl(path), [], 0
         for index, row in enumerate(rows, 1):
+            report(index, len(rows), f'states ({path.name})')
             if 'scores' in row and not args.force:
                 kept.append(row)
                 continue

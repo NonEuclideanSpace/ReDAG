@@ -264,6 +264,14 @@ def main():
     wanted = set(Path(args.ids).read_text().split()) if args.ids else None
     planner = None if args.heuristic else load_model(args)
     model_name = 'heuristic' if args.heuristic else args.model
+    from redag.progress import report
+    grand_done, grand_total = 0, 0
+    for path in args.sessions:  # total for progress reports (session files are small)
+        out = Path(args.output_dir) / (Path(path).stem + ('' if args.num_shards == 1 else f'.shard{args.shard}of{args.num_shards}') + '.jsonl')
+        finished = done_ids(out)
+        mine = [s['id'] for i, s in enumerate(iter_jsonl(path)) if i % args.num_shards == args.shard]
+        mine = [x for x in mine if x not in finished and (wanted is None or x in wanted)]
+        grand_total += len(mine[:args.limit] if args.limit else mine)
     for path in args.sessions:
         name = Path(path).stem + ('' if args.num_shards == 1 else f'.shard{args.shard}of{args.num_shards}')
         output = Path(args.output_dir) / f'{name}.jsonl'
@@ -308,6 +316,8 @@ def main():
                                             args.attempts, answers.get(i, '')))
                 counts['fallback'] += 1
             log(f'{name}: {start + len(batch)}/{len(todo)} done {counts}')
+            grand_done += len(batch)
+            report(grand_done, grand_total, 'sessions')
         log(f'{name}: finished {counts}')
 
 

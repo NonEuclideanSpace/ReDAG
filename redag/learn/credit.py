@@ -38,30 +38,45 @@ def compute_pairwise_advantages(rewards: List[float], delta_noise: float=0.015, 
     return advantages
 
 
-def credit_experiment(args, records, harness, controller, editor, planner, result, folder):
+def credit_experiment(args, records, harness, controller, editor, planner, result, folder, cache=None):
+    """Experiment 2 diagnostics.  With a CaseCache (run_eval_benchmarks.py) every finished session is stored at once,
+    so a stopped run resumes at the next session; audit sampling uses a per-session RNG so it does not depend on
+    where a run was resumed."""
     from redag.harness.environment import run_record
     from redag.learn.rl_trainer import ablation_reward
+    from redag.progress import report
     from redag.verify.verifier import export_view
-    rng, curves, audits, skipped = random.Random(args.seed), [], [], 0
+    curves, audits, skipped = [], [], 0
     methods = ('terminal_broadcast', 'step_full_table', 'subgraph_credit_ours')
     for index, record in enumerate(records):
-        _, _, trace = run_record(record, harness, controller, editor, args.max_steps, args.seed + index, 6, planner)
-        for step_index, step in enumerate(trace):
-            if len(step['candidate_group']) != 6:
-                skipped += 1
-                continue
-            groups = {method: [] for method in methods}
-            for candidate_index, candidate in enumerate(step['candidate_group']):
-                before, delivered, graph = candidate['parent_state'], candidate['delivered_state'], candidate['dag']
-                for method in methods:
-                    groups[method].append(ablation_reward(method, before, delivered, graph, candidate['reward'], harness, controller, editor, args.max_steps))
-                if rng.random() < 0.05:
-                    identifier = f'audit_{index}_{step_index}_{candidate_index}'
-                    audits.append({'source': 'evaluation_diagnostic', 'protection_lambda': harness.lam, 'before': export_view(before.image, graph, folder, identifier + '_before'), 'after': export_view(delivered.image, graph, folder, identifier + '_after'), 'affected': sorted(candidate['affected']), 'protected': sorted(before.protected_set)})
-            for method, rewards in groups.items():
-                values = torch.tensor(rewards)
-                advantages = compute_pairwise_advantages(rewards) if method == 'subgraph_credit_ours' else (values - values.mean()) * 6 / 5
-                curves.append({'session': index, 'step': step_index, 'method': method, 'rewards': rewards, 'advantages': advantages.tolist(), 'reward_variance': float(values.var(unbiased=False)), 'advantage_variance': float(advantages.var(unbiased=False))})
+        key = f'credit|{index}'
+        if cache is not None and key in cache:
+            row = cache[key]
+        else:
+            rng, row = random.Random(f'{args.seed}:credit:{index}'), dict(curves=[], audits=[], skipped=0)
+            _, _, trace = run_record(record, harness, controller, editor, args.max_steps, args.seed + index, 6, planner)
+            for step_index, step in enumerate(trace):
+                if len(step['candidate_group']) != 6:
+                    row['skipped'] += 1
+                    continue
+                groups = {method: [] for method in methods}
+                for candidate_index, candidate in enumerate(step['candidate_group']):
+                    before, delivered, graph = candidate['parent_state'], candidate['delivered_state'], candidate['dag']
+                    for method in methods:
+                        groups[method].append(ablation_reward(method, before, delivered, graph, candidate['reward'], harness, controller, editor, args.max_steps))
+                    if rng.random() < 0.05:
+                        identifier = f'audit_{index}_{step_index}_{candidate_index}'
+                        row['audits'].append({'source': 'evaluation_diagnostic', 'protection_lambda': harness.lam, 'before': export_view(before.image, graph, folder, identifier + '_before'), 'after': export_view(delivered.image, graph, folder, identifier + '_after'), 'affected': sorted(candidate['affected']), 'protected': sorted(before.protected_set)})
+                for method, rewards in groups.items():
+                    values = torch.tensor(rewards)
+                    advantages = compute_pairwise_advantages(rewards) if method == 'subgraph_credit_ours' else (values - values.mean()) * 6 / 5
+                    row['curves'].append({'session': index, 'step': step_index, 'method': method, 'rewards': rewards, 'advantages': advantages.tolist(), 'reward_variance': float(values.var(unbiased=False)), 'advantage_variance': float(advantages.var(unbiased=False))})
+            if cache is not None:
+                row = cache.add(key, **row)
+            report(index + 1, len(records), 'sessions')
+        curves.extend(row['curves'])
+        audits.extend(row['audits'])
+        skipped += row['skipped']
     result['diagnostic_reward_advantage_curves'] = curves
     result['diagnostic_incomplete_groups'] = skipped
     result.setdefault('full_audits', []).extend(audits)

@@ -121,6 +121,17 @@ class FluxEditor:
     def lora_parameters(self):
         return [p for name, p in self.transformer.named_parameters() if "lora_" in name]
 
+    def snapshot(self):
+        return {name: p.detach().cpu().clone() for name, p in self.transformer.named_parameters() if "lora_" in name}
+
+    def load_snapshot(self, snapshot):
+        parameters = dict(self.transformer.named_parameters())
+        if set(snapshot) != {name for name in parameters if "lora_" in name}:
+            raise ValueError("Adapter snapshot parameters do not match the editor")
+        with torch.no_grad():
+            for name, tensor in snapshot.items():
+                parameters[name].copy_(tensor.to(parameters[name]))
+
     def save_adapter(self, path):
         if not self.lora_parameters():
             raise ValueError("No editor LoRA adapter is loaded")

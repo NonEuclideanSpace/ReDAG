@@ -5,7 +5,7 @@ source "$(dirname "$0")/env.sh"
 cd "$REDAG_ROOT" || exit 1
 status=0
 nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv,noheader || status=1
-require_gpus 2 || status=1
+require_gpus "${MIN_GPUS:-2}" || status=1   # the scheduler runs this on one GPU (MIN_GPUS=1)
 $PY - "$PLANNER" "$CONTROLLER" "$EDITOR" "$VERIFIER" "$DETECTOR" "$SAM" <<'EOF' || status=1
 import json, sys
 from pathlib import Path

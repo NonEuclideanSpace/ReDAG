@@ -8,6 +8,7 @@ import argparse
 from pathlib import Path
 
 from _common import PROC, iter_jsonl, log
+from redag.progress import report
 
 
 def main():
@@ -42,6 +43,7 @@ def main():
             image.save(tmp)
             tmp.replace(out)
         log(f'{start + len(batch)}/{len(rows)} rendered')
+        report(start + len(batch), len(rows), 'canvases')
 
 
 if __name__ == '__main__':

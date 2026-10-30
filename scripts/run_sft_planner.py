@@ -19,10 +19,16 @@ def main():
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--learning_rate', type=float)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--checkpoint_minutes', type=float, default=20,
+                        help='resume checkpoint interval; rerunning the same command continues from the last one')
     args = parser.parse_args()
+    if (Path(args.output) / 'sft_complete.json').exists():  # finished earlier: nothing to load or train
+        print((Path(args.output) / 'sft_complete.json').read_text())
+        return
     records = read_records(args.data)
     model = Planner.from_pretrained(args.model, args.device, torch.float32 if args.device == 'cpu' else torch.bfloat16, args.adapter, True)
-    result = train_sft(model, records, args.output, 'planner', args.epochs, args.batch_size, args.learning_rate, args.seed)
+    result = train_sft(model, records, args.output, 'planner', args.epochs, args.batch_size, args.learning_rate, args.seed,
+                       args.checkpoint_minutes)
     print(json.dumps(result))
 
 

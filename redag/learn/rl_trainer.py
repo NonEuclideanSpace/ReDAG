@@ -278,12 +278,23 @@ def save_training_audit(output, identifier, parent, delivered, dag, affected, me
 
 
 def train_alternating(harness, controller, editor, records, dev_records, output, config=None, rounds=2, epochs=1, batch_size=4,
-                      reward_mode='subgraph_credit_ours', rollout_steps=5, seed=42, sources=None):
+                      reward_mode='subgraph_credit_ours', rollout_steps=5, seed=42, sources=None, interrupt_after=None):
+    """Alternating controller / editor RL (eq. 34, 39, 55), resumable at step granularity.
+
+    <output>/resume holds both LoRA adapters, the optimizer of the current stage, the RNG states, the data order, the
+    stage baseline and the best controller snapshot; it is written when a stage starts and after every step.  On a
+    rerun with the same settings, metrics and audit rows logged after it are dropped and training continues from it,
+    so an interrupted run ends with exactly the steps of an uninterrupted one.  A finished run (rl_complete.json)
+    returns its logged history.  interrupt_after=N is a test hook: stop right after the checkpoint of step N.
+    """
+    import hashlib
     import json
     import time
     from pathlib import Path
     from dataclasses import asdict
+    from redag.learn import checkpoint
     from redag.learn.credit import compute_pairwise_advantages
+    from redag.progress import report
     cfg = config or harness.config
     if rounds != 2 or epochs < 1 or batch_size != 4 or not records or not dev_records or rollout_steps < 1:
         raise ValueError('Training requires two rounds, batches of four, positive epochs and nonempty train/development data')
@@ -294,106 +305,171 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
         if train_ids & {r[key] for r in dev_records if isinstance(r.get(key), str)}:
             raise ValueError('Training and development IDs and image paths must be disjoint')
     output = Path(output)
-    if (output / 'metrics.jsonl').exists():
-        raise ValueError('Choose a fresh training output directory')
+    metrics_path, audits_path = output / 'metrics.jsonl', output / 'training_audits.jsonl'
+    if (output / 'rl_complete.json').exists():
+        return [json.loads(line) for line in metrics_path.read_text().splitlines() if line.strip()]
     output.mkdir(parents=True, exist_ok=True)
     ctrl_params, edit_params = controller.lora_parameters(), editor.lora_parameters()
     if not ctrl_params or not edit_params:
         raise ValueError('Both components require SFT adapters')
     ctrl_ref, edit_ref = controller.snapshot(), [p.detach().cpu().clone() for p in edit_params]
     devices = [i for i in range(torch.cuda.device_count()) if torch.cuda.memory_allocated(i)]
+
+    def digest(rows):
+        keys = [r['id'] if isinstance(r.get('id'), str) else str(i) for i, r in enumerate(rows)]
+        return hashlib.sha256('\n'.join(keys).encode()).hexdigest()[:16]
+    fingerprint = json.loads(json.dumps(dict(config=asdict(cfg), method=reward_mode, seed=seed, rounds=rounds, epochs=epochs,
+                                             batch_size=batch_size, rollout_steps=rollout_steps, train=[len(records), digest(records)],
+                                             dev=[len(dev_records), digest(dev_records)])))
     torch.manual_seed(seed)
-    rng, history, step = random.Random(seed), [], 0
-    audit_rng = random.Random(seed)
+    rng, audit_rng = random.Random(seed), random.Random(seed)
+    stages = [(r, s) for r in range(rounds) for s in ('ctrl_rl', 'edit_rl')]
     checkpoints = {'zero_shot': {'controller': None, 'editor': None}}
+    step, position, epoch, offset, order_index = 0, 0, 0, 0, None
+    baseline, best_p, best_ctrl, optimizer_state = None, None, None, None
+
+    def write_stage_file(mapping):
+        tmp = output / 'stage_checkpoints.json.tmp'
+        tmp.write_text(json.dumps(mapping, indent=2))
+        tmp.replace(output / 'stage_checkpoints.json')
+
     def save_stage(name):
         controller.save_adapter(output / name / 'controller')
         editor.save_adapter(output / name / 'editor')
         checkpoints[name] = {kind: f'{name}/{kind}' for kind in ('controller', 'editor')}
-        (output / 'stage_checkpoints.json').write_text(json.dumps(checkpoints, indent=2))
-    save_stage('sft')
-    environment = dict(config=asdict(harness.config), mode=harness.mode, gate_tau=harness.verifier.gate_tau,
-                       feather_px=harness.feather_px, step_cost=harness.step_cost, protection_lambda=harness.lam)
-    (output / 'training_config.json').write_text(json.dumps(dict(config=asdict(cfg), environment=environment, sources=sources,
-        method=reward_mode, seed=seed, epochs=epochs, batch_size=batch_size, rollout_steps=rollout_steps), indent=2))
-    (output / 'training_audits.jsonl').touch()
+        write_stage_file(checkpoints)
+
+    def save_checkpoint(optimizer, next_position, next_epoch, next_offset, next_order):
+        tensors = dict(controller=controller.snapshot(), editor=editor.snapshot())
+        if best_ctrl is not None and next_position < len(stages) and stages[next_position][1] == 'ctrl_rl':
+            tensors['best_ctrl'] = best_ctrl  # only the controller stages restore their best development snapshot
+        checkpoint.save(output, dict(fingerprint=fingerprint, step=step, position=next_position, epoch=next_epoch, offset=next_offset,
+                                     order=next_order, baseline=baseline, best_p=best_p, checkpoints=checkpoints),
+                        tensors=tensors, optimizer=optimizer, objects=dict(rng=rng.getstate(), audit_rng=audit_rng.getstate()))
+
+    resumed = checkpoint.load(output)
+    if resumed is None:
+        if metrics_path.exists() and metrics_path.read_text().strip():
+            raise ValueError('Choose a fresh training output directory')
+        save_stage('sft')
+        environment = dict(config=asdict(harness.config), mode=harness.mode, gate_tau=harness.verifier.gate_tau,
+                           feather_px=harness.feather_px, step_cost=harness.step_cost, protection_lambda=harness.lam)
+        (output / 'training_config.json').write_text(json.dumps(dict(config=asdict(cfg), environment=environment, sources=sources,
+            method=reward_mode, seed=seed, epochs=epochs, batch_size=batch_size, rollout_steps=rollout_steps), indent=2))
+        audits_path.touch()
+        save_checkpoint(None, 0, 0, 0, None)
+    else:
+        state, payload = resumed
+        if state['fingerprint'] != fingerprint:
+            raise ValueError(f'{output}/resume was written with different settings or data; use a fresh output directory '
+                             f'or delete {output}')
+        controller.load_snapshot(payload['tensors']['controller'])
+        editor.load_snapshot(payload['tensors']['editor'])
+        best_ctrl, optimizer_state = payload['tensors'].get('best_ctrl'), payload['optimizer']
+        rng.setstate(payload['objects']['rng'])
+        audit_rng.setstate(payload['objects']['audit_rng'])
+        checkpoint.set_rng_state(payload['rng'])
+        step, position, epoch, offset, order_index = state['step'], state['position'], state['epoch'], state['offset'], state['order']
+        baseline, best_p, checkpoints = state['baseline'], state['best_p'], state['checkpoints']
+        print(f'resuming {reward_mode} RL at step {step} (stage {position + 1}/{len(stages)}, epoch {epoch}, record {offset})', flush=True)
+    history = checkpoint.keep_jsonl_rows(metrics_path, lambda row: row.get('step', -1) < step)
+    checkpoint.keep_jsonl_rows(audits_path, lambda row: row.get('step', -1) < step)
+    total_steps = len(stages) * epochs * -(-len(records) // batch_size)
     editor.num_steps, editor.eta, editor.cfg_scale = cfg.num_denoise_steps, cfg.sde_eta, cfg.cfg_scale
-    for round_index in range(rounds):
-        for stage in ('ctrl_rl', 'edit_rl'):
-            for p in ctrl_params:
-                p.requires_grad_(stage == 'ctrl_rl')
-            for p in edit_params:
-                p.requires_grad_(stage == 'edit_rl')
-            editor.eval()
-            optimizer = torch.optim.AdamW(ctrl_params if stage == 'ctrl_rl' else edit_params,
-                                         lr=cfg.lr_rl_controller if stage == 'ctrl_rl' else cfg.lr_rl_editor, weight_decay=0)
+    for position in range(position, len(stages)):
+        round_index, stage = stages[position]
+        for p in ctrl_params:
+            p.requires_grad_(stage == 'ctrl_rl')
+        for p in edit_params:
+            p.requires_grad_(stage == 'edit_rl')
+        editor.eval()
+        optimizer = torch.optim.AdamW(ctrl_params if stage == 'ctrl_rl' else edit_params,
+                                     lr=cfg.lr_rl_controller if stage == 'ctrl_rl' else cfg.lr_rl_editor, weight_decay=0)
+        if baseline is None:  # the stage starts here
             baseline = evaluate_rl_development(dev_records, harness, controller, editor, ctrl_ref)
             best_p, best_ctrl = baseline['dev_acceptance_p'], controller.snapshot()
-            for _ in range(epochs):
-                order = list(records)
-                rng.shuffle(order)
-                for start in range(0, len(order), batch_size):
-                    for device in devices:
-                        torch.cuda.synchronize(device)
-                        torch.cuda.reset_peak_memory_stats(device)
-                    started = time.perf_counter()
-                    groups, rewards_all, advantages_all, old = [], [], [], controller.snapshot()
-                    for parent_index, record in enumerate(order[start:start + batch_size]):
-                        state, dag, target = select_failed_parent(record, harness)
-                        if target is None:
-                            continue
-                        items, rewards, conditioning = [], [], None
-                        editor.eval()
-                        if stage == 'edit_rl':
-                            action = sample_parent_action(controller, harness, state, dag, target, seed, 0)['action']
-                            conditioning = editor.prepare(state.image, action)
-                        # editor noise: shared by the controller candidates of one parent (they differ only by action),
-                        # distinct for the editor candidates of one parent, and fresh for every parent and step
-                        noise_seed = seed + 1000 * step + 10 * parent_index
-                        for index in range(cfg.group_size_ctrl if stage == 'ctrl_rl' else cfg.group_size_edit):
-                            if stage == 'ctrl_rl':
-                                item = sample_parent_action(controller, harness, state, dag, target, seed + step * 100 + index, 0.8)
-                                action, crop = item['action'], editor.render(state.image, item['action'], seed=noise_seed)
-                                item['inputs'] = {k: v.cpu() if torch.is_tensor(v) else v for k, v in item['inputs'].items()}
-                            else:
-                                item = editor.sample(state.image, action, seed=noise_seed + index, conditioning=conditioning)
-                                crop = item.pop('edited_crop')
-                            delivered, reward, _, affected = harness.evaluate_candidate_action(state, dag, target, action, crop.to(state.image.device))
-                            if audit_rng.random() < 0.05:
-                                save_training_audit(output, f'{reward_mode}_{step}_{parent_index}_{index}', state, delivered, dag, affected, reward_mode, stage, step, harness.lam)
-                            rewards.append(ablation_reward(reward_mode, state, delivered, dag, reward, harness, controller, editor, rollout_steps))
-                            items.append(item)
-                        values = torch.tensor(rewards)
-                        adv = compute_pairwise_advantages(rewards, cfg.delta_noise, cfg.reward_scale_s0, cfg.adv_clip_max) if reward_mode == 'subgraph_credit_ours' else values - (values.sum() - values) / (len(values) - 1)
-                        rewards_all.extend(rewards)
-                        advantages_all.extend(adv.tolist())
-                        groups.append((items, adv, conditioning))
-                    metrics = optimize_rollout(stage, groups, controller, editor, optimizer, old, ctrl_ref, edit_ref, cfg)
+            epoch, offset, order_index = 0, 0, None
+            save_checkpoint(optimizer, position, 0, 0, None)
+        elif optimizer_state is not None:
+            optimizer.load_state_dict(optimizer_state)
+        optimizer_state = None
+        while epoch < epochs:
+            if order_index is None:
+                order_index = list(range(len(records)))
+                rng.shuffle(order_index)
+            order = [records[i] for i in order_index]
+            for start in range(offset, len(order), batch_size):
+                for device in devices:
+                    torch.cuda.synchronize(device)
+                    torch.cuda.reset_peak_memory_stats(device)
+                started = time.perf_counter()
+                groups, rewards_all, advantages_all, old = [], [], [], controller.snapshot()
+                for parent_index, record in enumerate(order[start:start + batch_size]):
+                    state, dag, target = select_failed_parent(record, harness)
+                    if target is None:
+                        continue
+                    items, rewards, conditioning = [], [], None
                     editor.eval()
-                    metrics.update(evaluate_rl_development(dev_records, harness, controller, editor, ctrl_ref))
-                    for device in devices:
-                        torch.cuda.synchronize(device)
-                    metrics.update(step_wall_seconds=time.perf_counter() - started,
-                                   peak_cuda_allocated_bytes={f'cuda:{d}': torch.cuda.max_memory_allocated(d) for d in devices},
-                                   dev_initial_acceptance_p=baseline['dev_acceptance_p'],
-                                   dev_acceptance_gain=metrics['dev_acceptance_p'] - baseline['dev_acceptance_p'])
-                    metrics.update(stage=stage, round=round_index + 1, step=step, method=reward_mode,
-                                   sampled_parents=len(groups), sampled_candidates=len(rewards_all),
-                                   ctrl_lora_relative_displacement=relative_lora_displacement(ctrl_params, list(ctrl_ref.values())),
-                                   edit_lora_relative_displacement=relative_lora_displacement(edit_params, edit_ref),
-                                   reward_variance=float(torch.tensor(rewards_all).var(unbiased=False)) if rewards_all else 0.0,
-                                   advantage_variance=float(torch.tensor(advantages_all).var(unbiased=False)) if advantages_all else 0.0,
-                                   mean_reward=sum(rewards_all) / max(len(rewards_all), 1))
-                    with (output / 'metrics.jsonl').open('a') as stream:
-                        stream.write(json.dumps(metrics, allow_nan=False) + '\n')
-                    history.append(metrics)
-                    step += 1
-                    if stage == 'ctrl_rl' and metrics['dev_acceptance_p'] >= best_p:
-                        best_p, best_ctrl = metrics['dev_acceptance_p'], controller.snapshot()
-            if stage == 'ctrl_rl':
-                controller.load_snapshot(best_ctrl)
-            save_stage(stage if round_index == 0 else f'round_2/{stage}')
+                    if stage == 'edit_rl':
+                        action = sample_parent_action(controller, harness, state, dag, target, seed, 0)['action']
+                        conditioning = editor.prepare(state.image, action)
+                    # editor noise: shared by the controller candidates of one parent (they differ only by action),
+                    # distinct for the editor candidates of one parent, and fresh for every parent and step
+                    noise_seed = seed + 1000 * step + 10 * parent_index
+                    for index in range(cfg.group_size_ctrl if stage == 'ctrl_rl' else cfg.group_size_edit):
+                        if stage == 'ctrl_rl':
+                            item = sample_parent_action(controller, harness, state, dag, target, seed + step * 100 + index, 0.8)
+                            action, crop = item['action'], editor.render(state.image, item['action'], seed=noise_seed)
+                            item['inputs'] = {k: v.cpu() if torch.is_tensor(v) else v for k, v in item['inputs'].items()}
+                        else:
+                            item = editor.sample(state.image, action, seed=noise_seed + index, conditioning=conditioning)
+                            crop = item.pop('edited_crop')
+                        delivered, reward, _, affected = harness.evaluate_candidate_action(state, dag, target, action, crop.to(state.image.device))
+                        if audit_rng.random() < 0.05:
+                            save_training_audit(output, f'{reward_mode}_{step}_{parent_index}_{index}', state, delivered, dag, affected, reward_mode, stage, step, harness.lam)
+                        rewards.append(ablation_reward(reward_mode, state, delivered, dag, reward, harness, controller, editor, rollout_steps))
+                        items.append(item)
+                    values = torch.tensor(rewards)
+                    adv = compute_pairwise_advantages(rewards, cfg.delta_noise, cfg.reward_scale_s0, cfg.adv_clip_max) if reward_mode == 'subgraph_credit_ours' else values - (values.sum() - values) / (len(values) - 1)
+                    rewards_all.extend(rewards)
+                    advantages_all.extend(adv.tolist())
+                    groups.append((items, adv, conditioning))
+                metrics = optimize_rollout(stage, groups, controller, editor, optimizer, old, ctrl_ref, edit_ref, cfg)
+                editor.eval()
+                metrics.update(evaluate_rl_development(dev_records, harness, controller, editor, ctrl_ref))
+                for device in devices:
+                    torch.cuda.synchronize(device)
+                metrics.update(step_wall_seconds=time.perf_counter() - started,
+                               peak_cuda_allocated_bytes={f'cuda:{d}': torch.cuda.max_memory_allocated(d) for d in devices},
+                               dev_initial_acceptance_p=baseline['dev_acceptance_p'],
+                               dev_acceptance_gain=metrics['dev_acceptance_p'] - baseline['dev_acceptance_p'])
+                metrics.update(stage=stage, round=round_index + 1, step=step, method=reward_mode,
+                               sampled_parents=len(groups), sampled_candidates=len(rewards_all),
+                               ctrl_lora_relative_displacement=relative_lora_displacement(ctrl_params, list(ctrl_ref.values())),
+                               edit_lora_relative_displacement=relative_lora_displacement(edit_params, edit_ref),
+                               reward_variance=float(torch.tensor(rewards_all).var(unbiased=False)) if rewards_all else 0.0,
+                               advantage_variance=float(torch.tensor(advantages_all).var(unbiased=False)) if advantages_all else 0.0,
+                               mean_reward=sum(rewards_all) / max(len(rewards_all), 1))
+                with metrics_path.open('a') as stream:
+                    stream.write(json.dumps(metrics, allow_nan=False) + '\n')
+                history.append(metrics)
+                step += 1
+                if stage == 'ctrl_rl' and metrics['dev_acceptance_p'] >= best_p:
+                    best_p, best_ctrl = metrics['dev_acceptance_p'], controller.snapshot()
+                if start + batch_size < len(order):
+                    save_checkpoint(optimizer, position, epoch, start + batch_size, order_index)
+                else:
+                    save_checkpoint(optimizer, position, epoch + 1, 0, None)
+                report(step, total_steps, 'steps')
+                if interrupt_after is not None and step >= interrupt_after:
+                    raise checkpoint.Interrupted(f'interrupted after step {step}')
+            epoch, offset, order_index = epoch + 1, 0, None
+        if stage == 'ctrl_rl':
+            controller.load_snapshot(best_ctrl)
+        save_stage(stage if round_index == 0 else f'round_2/{stage}')
+        baseline, best_p, best_ctrl, epoch, offset, order_index = None, None, None, 0, 0, None
     save_stage('alternating_rl')
-    checkpoints = {k: v for k, v in checkpoints.items() if not k.startswith('round_2/')}
-    (output / 'stage_checkpoints.json').write_text(json.dumps(checkpoints, indent=2))
+    write_stage_file({k: v for k, v in checkpoints.items() if not k.startswith('round_2/')})
+    (output / 'rl_complete.json').write_text(json.dumps({'steps': step, 'finished': time.time()}))
+    checkpoint.clear(output)
     return history
