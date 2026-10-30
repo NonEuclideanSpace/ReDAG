@@ -45,6 +45,8 @@ def test_health_flags_problems_and_notifies_once(tmp_path):
 
 def test_gates_hold_jobs_until_released(tmp_path, monkeypatch):
     import pipeline
+    for name in ('CLAIMS_HOST', 'LOCAL_JOBS', 'EXTERNAL_JOBS', 'SHARED_JOBS', 'NOT_BEFORE', 'SYNC_PEER'):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv('RUNS', str(tmp_path / 'runs'))
     monkeypatch.setenv('HOLD', 'exp3 after_rl')
     monkeypatch.setattr(pipeline, 'query_gpus', lambda: [dict(index=0, name='GPU', used=0, total=97887)])
