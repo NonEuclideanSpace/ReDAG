@@ -75,7 +75,7 @@ def structure(graph):
     longest = max((depth(i) for i in nodes), default=0)
     return dict(n=n, depth=longest, local=sum(x.get('scope') == 'local' for x in nodes.values()) / max(n, 1),
                 linked=sum(1 for i in structured if deps[i]) / len(structured) if structured else None,
-                flat_structured=longest == 0 and bool(structured), chain=n >= 6 and longest >= 0.8 * n)
+                flat_structured=longest == 0 and len(structured) >= max(2, 0.3 * n), chain=n >= 6 and longest >= 0.8 * n)
 
 
 def graph_structure(root):
