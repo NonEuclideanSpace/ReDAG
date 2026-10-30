@@ -178,7 +178,10 @@ def rl(runs):
         kl_stops = sum(1 for s in steps if s.get('kl_early_stop')) / len(steps)
         guards = sum(1 for s in steps if s.get('ratio_guard_hit'))
         gain = statistics.fmean(s.get('dev_acceptance_gain', 0.0) for s in recent)
+        full_boxes = statistics.fmean(s.get('action_full_box_share', 0.0) for s in recent)
         problems = []
+        if full_boxes > 0.6:
+            problems.append(f'{full_boxes:.0%} of recent actions edit the whole image (window compositing no longer protects the rest)')
         if no_update > 0.5:
             problems.append(f'{no_update:.0%} of steps made no update (no learning signal)')
         if same_rewards > 0.5:
@@ -192,7 +195,8 @@ def rl(runs):
         status = BAD if no_update > 0.8 or gain < -0.2 else WARN if problems else OK
         out.append(item(f'rl/{name}', '3 RL', status,
                         f"step {last.get('step')} ({last.get('stage')}): dev acceptance {last.get('dev_acceptance_p', 0):.2f} "
-                        f"(stage start {last.get('dev_initial_acceptance_p', 0):.2f}), mean reward {last.get('mean_reward', 0):.3f}",
+                        f"(stage start {last.get('dev_initial_acceptance_p', 0):.2f}), mean reward {last.get('mean_reward', 0):.3f}, "
+                        f"whole-image boxes {full_boxes:.0%}",
                         '; '.join(problems)))
     return out
 

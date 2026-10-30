@@ -404,6 +404,7 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
                     torch.cuda.reset_peak_memory_stats(device)
                 started = time.perf_counter()
                 groups, rewards_all, advantages_all, old = [], [], [], controller.snapshot()
+                areas, ops = [], {}
                 for parent_index, record in enumerate(order[start:start + batch_size]):
                     state, dag, target = select_failed_parent(record, harness)
                     if target is None:
@@ -429,6 +430,8 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
                             save_training_audit(output, f'{reward_mode}_{step}_{parent_index}_{index}', state, delivered, dag, affected, reward_mode, stage, step, harness.lam)
                         rewards.append(ablation_reward(reward_mode, state, delivered, dag, reward, harness, controller, editor, rollout_steps))
                         items.append(item)
+                        areas.append(max(0.0, action.box[2] - action.box[0]) * max(0.0, action.box[3] - action.box[1]))
+                        ops[action.op] = ops.get(action.op, 0) + 1
                     values = torch.tensor(rewards)
                     adv = compute_pairwise_advantages(rewards, cfg.delta_noise, cfg.reward_scale_s0, cfg.adv_clip_max) if reward_mode == 'subgraph_credit_ours' else values - (values.sum() - values) / (len(values) - 1)
                     rewards_all.extend(rewards)
@@ -449,7 +452,9 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
                                edit_lora_relative_displacement=relative_lora_displacement(edit_params, edit_ref),
                                reward_variance=float(torch.tensor(rewards_all).var(unbiased=False)) if rewards_all else 0.0,
                                advantage_variance=float(torch.tensor(advantages_all).var(unbiased=False)) if advantages_all else 0.0,
-                               mean_reward=sum(rewards_all) / max(len(rewards_all), 1))
+                               mean_reward=sum(rewards_all) / max(len(rewards_all), 1),
+                               action_box_area_mean=sum(areas) / max(len(areas), 1),
+                               action_full_box_share=sum(a >= 0.95 for a in areas) / max(len(areas), 1), action_ops=ops)
                 with metrics_path.open('a') as stream:
                     stream.write(json.dumps(metrics, allow_nan=False) + '\n')
                 history.append(metrics)

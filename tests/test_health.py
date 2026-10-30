@@ -43,6 +43,20 @@ def test_health_flags_problems_and_notifies_once(tmp_path):
     assert len(sent) == 1
 
 
+def test_rl_health_flags_a_policy_that_edits_the_whole_image(tmp_path):
+    runs = tmp_path / 'runs'
+    write(runs / 'rl/main/metrics.jsonl', [dict(step=i, stage='ctrl_rl', optimizer_updates=1, reward_variance=0.1, kl_early_stop=False,
+                                                dev_acceptance_p=0.4, dev_initial_acceptance_p=0.4, dev_acceptance_gain=0.0, mean_reward=0.2,
+                                                action_full_box_share=share, action_box_area_mean=0.5, action_ops={'modify_attr': 4})
+                                           for i, share in enumerate([0.2] * 4 + [0.9] * 8)])
+    check = next(c for c in health.rl(runs) if c['key'] == 'rl/main')
+    assert check['status'] == 'warn' and 'whole image' in check['detail'] and 'whole-image boxes 90%' in check['value']
+    write(runs / 'rl/main/metrics.jsonl', [dict(step=i, stage='ctrl_rl', optimizer_updates=1, reward_variance=0.1, kl_early_stop=False,
+                                                dev_acceptance_p=0.4, dev_initial_acceptance_p=0.4, dev_acceptance_gain=0.0, mean_reward=0.2,
+                                                action_full_box_share=0.25) for i in range(12)])
+    assert next(c for c in health.rl(runs) if c['key'] == 'rl/main')['status'] == 'ok'
+
+
 def test_gates_hold_jobs_until_released(tmp_path, monkeypatch):
     import pipeline
     for name in ('CLAIMS_HOST', 'LOCAL_JOBS', 'EXTERNAL_JOBS', 'SHARED_JOBS', 'NOT_BEFORE', 'SYNC_PEER'):
