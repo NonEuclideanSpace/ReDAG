@@ -156,6 +156,18 @@ def train_sft(model, records, output, kind, epochs=1, batch_size=1, learning_rat
     return result
 
 
+def piece_bounds(costs, piece, pieces):
+    total, cuts, running, k = sum(costs), [], 0.0, 1
+    for i, cost in enumerate(costs):
+        while k < pieces and running >= total * k / pieces:
+            cuts.append(i)
+            k += 1
+        running += cost
+    cuts += [len(costs)] * (pieces - 1 - len(cuts))
+    bounds = [0, *cuts, len(costs)]
+    return bounds[piece], bounds[piece + 1]
+
+
 def collect_controller_rs(records, harness, controller, editor, output, seed=42, index_offset=0):
     import json
     from dataclasses import asdict
