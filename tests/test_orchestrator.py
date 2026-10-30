@@ -162,3 +162,32 @@ def test_cpu_only_machine_runs_cpu_jobs_then_stops(tmp_path):
     assert scheduler.run() == 'stalled'
     states = make(tmp_path, jobs, gpus=[]).classify()
     assert states == {'download': 'done', 'train': 'held'}
+
+
+def test_requested_restart_relaunches_without_using_an_attempt(tmp_path):
+    count = tmp_path / 'count.txt'
+    # first run: wait to be killed; second run (after the restart): finish
+    code = f"""
+        import os, time
+        path = r'{count}'
+        n = int(open(path).read()) if os.path.exists(path) else 0
+        open(path, 'w').write(str(n + 1))
+        if n == 0:
+            time.sleep(30)
+    """
+    jobs = [Job('job', py(code), gpus=1, attempts=1)]  # one attempt: a counted failure would mark it failed
+    scheduler = make(tmp_path, jobs)
+    result = {}
+    thread = threading.Thread(target=lambda: result.update(outcome=scheduler.run()))
+    thread.start()
+    state = tmp_path / 'runs' / 'state' / 'jobs'
+    deadline = time.time() + 20
+    while not (count.exists() and lock_held(state / 'job.lock')) and time.time() < deadline:
+        time.sleep(0.05)
+    pgid = json.loads((state / 'job.json').read_text())['pgid']
+    (state / 'job.restart').write_text('now\n')  # what `pipeline.py restart job` does
+    os.killpg(pgid, signal.SIGTERM)
+    thread.join(60)
+    assert result['outcome'] == 'complete'
+    assert count.read_text() == '2'
+    assert not (state / 'job.failed').exists() and not (state / 'job.restart').exists()

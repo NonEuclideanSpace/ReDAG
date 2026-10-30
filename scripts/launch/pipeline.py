@@ -665,6 +665,28 @@ def cmd_release(args, s):
     return 0
 
 
+def cmd_restart(args, s):
+    """Restart running jobs so that they pick up new code (after git pull).  Resumable jobs continue from their last
+    checkpoint; the restart is not counted as a failed attempt.  The running scheduler starts them again within seconds."""
+    jobs = Path(s['RUNS']) / 'state' / 'jobs'
+    status = 0
+    for name in args.jobs:
+        pgid = (read_json(jobs / f'{name}.json') or {}).get('pgid')
+        if not pgid or not lock_held(jobs / f'{name}.lock'):
+            print(f'{name}: not running on this machine')
+            status = 1
+            continue
+        orch.atomic_write(jobs / f'{name}.restart', time.strftime('%F %T') + '\n')
+        try:
+            os.killpg(pgid, 15)
+            print(f'{name}: restarting')
+        except ProcessLookupError:
+            print(f'{name}: already gone')
+    if not scheduler_running(s['RUNS']):
+        print('no scheduler is running: start one with go.sh')
+    return status
+
+
 def cmd_list(args, s):
     jobs, _ = build_jobs(s)
     for job in jobs:
@@ -957,6 +979,8 @@ def main(argv=None):
     logs.add_argument('job')
     logs.add_argument('-n', type=int, default=40)
     logs.add_argument('-f', '--follow', action='store_true')
+    restart = sub.add_parser('restart', help='restart running jobs with the current code (resume, not counted as a failure)')
+    restart.add_argument('jobs', nargs='+')
     reset = sub.add_parser('reset', help='forget that jobs finished (outputs are kept)')
     reset.add_argument('jobs', nargs='+')
     reset.add_argument('--dependents', action='store_true')
@@ -998,7 +1022,8 @@ def main(argv=None):
         print('sent' if ok else 'not sent (is NOTIFY_URL set?)')
         return 0 if ok else 1
     return {'run': cmd_run, 'status': cmd_status, 'stop': cmd_stop, 'plan': cmd_plan, 'list': cmd_list,
-            'logs': cmd_logs, 'reset': cmd_reset, 'sync': cmd_sync, 'health': cmd_health, 'release': cmd_release}[args.command](args, s)
+            'logs': cmd_logs, 'reset': cmd_reset, 'sync': cmd_sync, 'health': cmd_health, 'release': cmd_release,
+            'restart': cmd_restart}[args.command](args, s)
 
 
 if __name__ == '__main__':

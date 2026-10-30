@@ -51,3 +51,11 @@ def test_batches_are_full_homogeneous_and_retries_are_merged(tmp_path, monkeypat
     assert max(len(b) for b in batches if b[0].startswith('c')) == 2  # 4 halved after the out-of-memory error
     assert max(len(b) for b in batches if b[0].startswith('m')) <= 2  # image batches use half the text batch size
     assert batches[0][0] == 'c4'  # largest checklist first
+
+
+def test_cut_off_answers_get_a_compact_json_retry_instruction():
+    import annotate_graphs as ag
+    assert ag.cut_off('{"nodes": [{"node_id": "q1"}, {"node_id": "q2"') and ag.cut_off('')
+    assert not ag.cut_off('{"nodes": []}\n') and not ag.cut_off('```json\n{"nodes": []}\n```')
+    assert 'single line' in ag.FIELD_RULES and 'single-line' in ag.CUT_OFF
+    assert '"superseded": {}}' in ag.FIELD_RULES.replace('"int_edges": [...]}', '"int_edges": [...], "superseded": {}}')
