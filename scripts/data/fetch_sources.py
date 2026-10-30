@@ -85,6 +85,60 @@ def listing(repo_id, folder):
     raise RuntimeError(f'Could not list {repo_id}')
 
 
+MODELSCOPE = {'magicbrush': 'osunlp/MagicBrush'}  # ModelScope dataset mirrors: much faster than hf-mirror inside China
+
+
+def modelscope_listing(dataset, root):
+    import urllib.request
+    api = f'https://www.modelscope.cn/api/v1/datasets/{dataset}/repo/tree'
+    files = []
+    for page in range(1, 20):
+        query = f'Revision=master&Root={root}&Recursive=True&PageNumber={page}&PageSize=100'
+        with urllib.request.urlopen(urllib.request.Request(f'{api}{chr(63)}{query}', headers={'User-Agent': 'Mozilla/5.0'}), timeout=60) as response:
+            batch = json.loads(response.read().decode()).get('Data', {}).get('Files', [])
+        files += [(f['Path'], int(f.get('Size') or 0)) for f in batch if f.get('Type') != 'tree']
+        if len(batch) < 100:
+            return files
+    return files
+
+
+def fetch_modelscope(dataset, filename, size, target):
+    """Resumable download from ModelScope; returns (filename, status) like fetch()."""
+    import urllib.request
+    path = target / filename
+    if path.exists() and (not size or path.stat().st_size == size):
+        return filename, 'cached'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(path.name + '.ms-incomplete')
+    have = part.stat().st_size if part.exists() else 0
+    url = f'https://www.modelscope.cn/api/v1/datasets/{dataset}/repo{chr(63)}Revision=master&FilePath={filename}'
+    for attempt in range(60):
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0', **({'Range': f'bytes={have}-'} if have else {})}
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as response:
+                mode = 'ab' if have and response.status == 206 else 'wb'
+                have = have if mode == 'ab' else 0
+                with open(part, mode) as out:
+                    while True:
+                        chunk = response.read(4 << 20)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        have += len(chunk)
+            if not size or have >= size:
+                break
+        except Exception as error:
+            log(f'{filename}: ModelScope {type(error).__name__}; retry {attempt + 1}/60')
+            time.sleep(min(60, 2 + 2 * attempt))
+    if size and have != size:
+        return filename, 'failed'
+    if path.exists() and (not size or path.stat().st_size == size):
+        part.unlink(missing_ok=True)  # another downloader finished the same file first
+    else:
+        part.replace(path)
+    return filename, 'ok'
+
+
 def fetch(repo_id, filename, size, target):
     from huggingface_hub import hf_hub_download
     path = target / filename
@@ -134,9 +188,16 @@ def main():
                 picked += chosen[:args.max_files] if args.max_files else chosen
             files = picked
         log(f'{name}: {len(files)} files, {sum(s or 0 for _, s in files) / 2**30:.2f} GiB from {repo_id}')
-        results = {}
+        results, mirror = {}, MODELSCOPE.get(name)
+
+        def get(filename, size):  # ModelScope first where a mirror exists, then hf-mirror
+            if mirror:
+                got = fetch_modelscope(mirror, filename, size, target)
+                if got[1] != 'failed':
+                    return got
+            return fetch(repo_id, filename, size, target)
         with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
-            futures = [pool.submit(fetch, repo_id, f, s, target) for f, s in files]
+            futures = [pool.submit(get, f, s) for f, s in files]
             for future in as_completed(futures):
                 filename, status = future.result()
                 results[filename] = status
