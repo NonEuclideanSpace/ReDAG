@@ -57,7 +57,7 @@ def settings():
                 N_RS_STATES=1000, N_RL_TRAIN=128, N_RL_DEV=16, N_EXP2=64, EXP2_MAX_STEPS=3, CANVAS_SIZE=768, CANVAS_STEPS=50,
                 EDITOR_EPOCHS=1, PLANNER_EPOCHS=1, CONTROLLER_EPOCHS=2, ANNOTATE_SHARDS=8, ANNOTATE_BATCH=8, CANVAS_SHARDS=4,
                 RS_SHARDS=4, EXP1_SHARDS=12, EXP3_SHARDS=12, EXP1_EXTRA=0, RUN_EXP2=1, FETCH_WORKERS=6, WORKERS=1, SKIP_PREFLIGHT=0,
-                DOWNLOAD_WORKERS=16)
+                DOWNLOAD_WORKERS=16, RS_PIECES=1)
     for key, default in ints.items():
         s[key] = int(env(key, default))
     s.update(CKPT_MINUTES=float(env('CKPT_MINUTES', 20)), RS_LAYOUT=env('RS_LAYOUT', 'shard'), EVAL_LAYOUT=env('EVAL_LAYOUT', 'shard'),
@@ -205,14 +205,20 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
         rs_done = 'rs_single'
     else:
         parts = s['RS_SHARDS']
+        split_parts = {int(k) for k in env('RS_SPLIT_PARTS', '').split()}
         add('rs_split', me + ['_split', data / 'controller_rs_states.jsonl', parts], deps=('build_sets',), group=g)
+        rs_jobs, rs_outputs = [], []
         for k in range(parts):
-            add(f'rs_part{k}', rs_common + ['--device', 'cuda:0', '--editor_device', 'cuda:0',
-                                            '--data', data / f'controller_rs_states.part{k}.jsonl', '--output', data / f'controller_sft.part{k}.jsonl',
-                                            '--seed', 42 + k * 100000],
-                gpus=1, deps=('sft_editor', 'rs_split') + canvases, hours=4.0 / parts, group=g, family='rs')
-        add('rs_merge', me + ['_concat', data / 'controller_sft.jsonl'] + [data / f'controller_sft.part{k}.jsonl' for k in range(parts)],
-            deps=tuple(f'rs_part{k}' for k in range(parts)), group=g)
+            pieces = [(f'rs_part{k}_{i}', f'controller_sft.part{k}_{i}.jsonl', ['--piece', i, '--pieces', s['RS_PIECES']])
+                      for i in range(s['RS_PIECES'])] if k in split_parts and s['RS_PIECES'] > 1 else [(f'rs_part{k}', f'controller_sft.part{k}.jsonl', [])]
+            for name, output, piece in pieces:
+                add(name, rs_common + ['--device', 'cuda:0', '--editor_device', 'cuda:0',
+                                       '--data', data / f'controller_rs_states.part{k}.jsonl', '--output', data / output,
+                                       '--seed', 42 + k * 100000, *piece],
+                    gpus=1, deps=('sft_editor', 'rs_split') + canvases, hours=4.0 / parts / len(pieces), group=g, family='rs')
+                rs_jobs.append(name)
+                rs_outputs.append(data / output)
+        add('rs_merge', me + ['_concat', data / 'controller_sft.jsonl'] + rs_outputs, deps=tuple(rs_jobs), group=g)
         rs_done = 'rs_merge'
     add('check_controller_sft', [py, f'{D}/check_data.py', '--only', 'controller_sft'], deps=(rs_done,), group=g)
     add('sft_controller', [py, 'scripts/run_sft_controller.py', '--data', data / 'controller_sft.jsonl', '--output', sft / 'controller',

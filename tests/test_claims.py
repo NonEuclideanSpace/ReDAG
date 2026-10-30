@@ -115,3 +115,23 @@ def test_sync_markers_follow_jobs_added_later(monkeypatch, tmp_path):
     finals = calls[1]
     assert '--include=runs/logs/*.done' in finals and '--exclude=runs/logs/preflight.done' in finals
     assert '--exclude=runs/logs/download_models.done' in finals and finals.index('--exclude=runs/logs/preflight.done') < finals.index('--include=runs/logs/*.done')
+
+
+def test_unstarted_rejection_sampling_parts_split_into_pieces(monkeypatch):
+    clean_env(monkeypatch)
+    monkeypatch.setenv('RS_SHARDS', '6')
+    monkeypatch.setenv('RS_SPLIT_PARTS', '3 5')
+    monkeypatch.setenv('RS_PIECES', '3')
+    jobs, _ = pipeline.build_jobs(pipeline.settings())
+    by_name = {j.name: j for j in jobs}
+    assert 'rs_part2' in by_name and 'rs_part3' not in by_name and 'rs_part4' in by_name
+    piece = by_name['rs_part3_1'].cmd
+    assert piece[piece.index('--piece') + 1] == '1' and piece[piece.index('--pieces') + 1] == '3'
+    assert piece[piece.index('--seed') + 1] == str(42 + 3 * 100000) and piece[piece.index('--data') + 1].endswith('controller_rs_states.part3.jsonl')
+    merge = by_name['rs_merge']
+    outputs = [Path(c).name for c in merge.cmd if 'controller_sft.part' in c]
+    assert outputs == ['controller_sft.part0.jsonl', 'controller_sft.part1.jsonl', 'controller_sft.part2.jsonl', 'controller_sft.part3_0.jsonl',
+                       'controller_sft.part3_1.jsonl', 'controller_sft.part3_2.jsonl', 'controller_sft.part4.jsonl', 'controller_sft.part5_0.jsonl',
+                       'controller_sft.part5_1.jsonl', 'controller_sft.part5_2.jsonl']
+    assert set(merge.deps) == {'rs_part0', 'rs_part1', 'rs_part2', 'rs_part3_0', 'rs_part3_1', 'rs_part3_2', 'rs_part4', 'rs_part5_0',
+                               'rs_part5_1', 'rs_part5_2'}
