@@ -67,7 +67,8 @@ def checklist_prompt(session):
             'Goals (keep every id; rewrite each goal as ONE yes/no question that is true exactly when the goal is met):')
     return (f"{'Scene description' if session['kind'] == 't2i' else 'Edit request'}:\n{session['prompt'][:3000]}\n\n{keep}\n"
             + '\n'.join(lines) + '\n\nInclude every item as a node. You may add entity nodes e1, e2, ... (question "Is there '
-            '<object> in the image?") for objects that other items depend on but that have no presence item. Tag hints: '
+            '<object> in the image?") for objects that other items depend on but that have no presence item; add no other '
+            'nodes (relations, attributes, counts and texts are already checklist items). Tag hints: '
             'instance_pos=entity, instance_neg=prohibition, attribute_*=attribute, relation=relation, add_object=entity, '
             'text=attribute of the object carrying the text, lighting/effect=background unless tied to one object.\n' + FIELD_RULES)
 
@@ -95,13 +96,64 @@ def instruction_prompt(session, inventory):
             + INSTRUCTION_RULES.replace('"int_edges": [...]}', '"int_edges": [...], "superseded": {}}'))
 
 
+def extra_checklist_nodes(value, checklist):
+    """Checklist answers often add the model's own nodes for relations or rendered text (r1, t1, ...), which the
+    conditions must not contain: the conditions are exactly the checklist.  Extra entity nodes become e<k>; every
+    other extra node is dropped and the checklist items that depended on it depend on its dependencies instead.
+    Returns (value with only checklist / e<k> nodes, warnings)."""
+    raw_nodes = [r for r in value.get('nodes', []) if isinstance(r, dict)]
+    key = lambda raw: str(raw.get('node_id', '')).strip()
+    allowed = lambda nid: nid in checklist or re.fullmatch(r'e\d+', nid)
+    numbers = [int(key(r)[1:]) for r in raw_nodes if re.fullmatch(r'e\d+', key(r))]
+    rename, dropped, fresh = {}, {}, max(numbers, default=0) + 1
+    for raw in raw_nodes:
+        nid = key(raw)
+        if not nid or allowed(nid):
+            continue
+        if str(raw.get('node_type', '')).strip().lower() == 'entity' and str(raw.get('entity_phrase') or '').strip():
+            rename[nid], fresh = f'e{fresh}', fresh + 1
+        else:
+            dropped[nid] = [str(d).strip() for d in raw.get('depends_on') or [] if isinstance(d, (str, int))]
+    if not rename and not dropped:
+        return value, []
+
+    def resolve(dep, seen=()):
+        if dep in dropped:
+            return [] if dep in seen else [x for d in dropped[dep] for x in resolve(d, seen + (dep,))]
+        return [rename.get(dep, dep)]
+
+    nodes = []
+    for raw in raw_nodes:
+        nid = key(raw)
+        if not nid:
+            nodes.append(raw)  # no id: ignored by to_graph as before
+            continue
+        if nid in dropped:
+            continue
+        new_id = rename.get(nid, nid)
+        deps = [x for d in raw.get('depends_on') or [] if isinstance(d, (str, int)) for x in resolve(str(d).strip())]
+        nodes.append(dict(raw, node_id=new_id, depends_on=list(dict.fromkeys(d for d in deps if d != new_id))))
+    out = dict(value, nodes=nodes)
+    for name in ('comp_edges', 'supp_edges', 'int_edges'):
+        pairs = value.get(name)
+        if isinstance(pairs, list):
+            out[name] = [[rename.get(str(p[0]).strip(), p[0]), rename.get(str(p[1]).strip(), p[1])] if isinstance(p, (list, tuple)) and len(p) == 2 else p
+                         for p in pairs if not (isinstance(p, (list, tuple)) and len(p) == 2 and {str(p[0]).strip(), str(p[1]).strip()} & set(dropped))]
+    warnings = ([f'extra entity nodes renamed {rename}'] if rename else []) + ([f'extra nodes dropped {sorted(dropped)}'] if dropped else [])
+    return out, warnings
+
+
 def to_graph(value, session, mode):
     """LLM JSON -> (sanitized graph dict, statements, node_turn, superseded, warnings). Raises on invalid output."""
+    checklist = {c['qid']: c for c in session.get('checklist', [])}
     raw_nodes = value.get('nodes', [])
     if isinstance(raw_nodes, dict):
         raw_nodes = [dict(n, node_id=k) for k, n in raw_nodes.items()]
-    nodes, statements, node_turn, warnings = {}, {}, {}, []
-    checklist = {c['qid']: c for c in session.get('checklist', [])}
+    warnings = []
+    if mode == 'checklist' and isinstance(raw_nodes, list):
+        value, warnings = extra_checklist_nodes(dict(value, nodes=raw_nodes), checklist)
+        raw_nodes = value['nodes']
+    nodes, statements, node_turn = {}, {}, {}
     for raw in raw_nodes:
         if not isinstance(raw, dict) or 'node_id' not in raw:
             continue
