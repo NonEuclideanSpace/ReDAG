@@ -454,12 +454,14 @@ class Scheduler:
         for name in self.order:
             if name in self.running or self.is_done(name):
                 continue
-            if lock_held(self.path(name, 'lock')):
-                spec = read_json(self.path(name, 'json'), {})
-                self.running[name] = dict(proc=None, gpus=spec.get('gpu_ids', []), started=spec.get('started', time.time()),
-                                          attempt=spec.get('attempt', 1), adopted=True, pgid=spec.get('pgid'))
-                self.attempts[name] = spec.get('attempt', 1)
-                self.log(f'adopted running job {name} (GPUs {spec.get("gpu_ids", [])})')
+            if not lock_held(self.path(name, 'lock')):
+                self.path(name, 'restart').unlink(missing_ok=True)  # stale request for a job that is not running
+                continue
+            spec = read_json(self.path(name, 'json'), {})
+            self.running[name] = dict(proc=None, gpus=spec.get('gpu_ids', []), started=spec.get('started', time.time()),
+                                      attempt=spec.get('attempt', 1), adopted=True, pgid=spec.get('pgid'))
+            self.attempts[name] = spec.get('attempt', 1)
+            self.log(f'adopted running job {name} (GPUs {spec.get("gpu_ids", [])})')
 
     def launch(self, name, gpus):
         job = self.jobs[name]
@@ -505,6 +507,12 @@ class Scheduler:
                 continue
             if self.stopping:
                 self.log(f'stopped {name}; it resumes from its last checkpoint on the next run')
+                continue
+            if self.path(name, 'restart').exists():  # `pipeline.py restart`: new code for a running job, not a failure
+                self.path(name, 'restart').unlink(missing_ok=True)
+                self.attempts[name] = max(0, self.attempts.get(name, 1) - 1)
+                self.retry_at.pop(name, None)
+                self.log(f'restart {name} (requested; resumes from its last checkpoint, not counted as an attempt)')
                 continue
             reason = f'exit status {status}' if status is not None else 'interrupted (no exit status)'
             tail = tail_lines(self.logs / f'{name}.log', 12)

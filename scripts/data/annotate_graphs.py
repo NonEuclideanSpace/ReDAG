@@ -37,7 +37,15 @@ FIELD_RULES = """Node fields: node_id, node_type, question, entity_phrase, scope
 - statement: the requirement as one short declarative sentence.
 Edges: comp_edges [entity id, dependent attribute/relation id]; supp_edges [supporting object id, supported object id]
 (e.g. table -> cup on the table); int_edges [id, id] for similar or overlapping objects that an edit of one may disturb.
-No dependency cycles. Return {"nodes": [...], "comp_edges": [...], "supp_edges": [...], "int_edges": [...]}"""
+No dependency cycles. Return {"nodes": [...], "comp_edges": [...], "supp_edges": [...], "int_edges": [...]}
+Write the JSON compactly on a single line, without indentation or line breaks: large graphs must fit the answer length limit."""
+CUT_OFF = ('the answer was cut off before the JSON was complete (answer length limit); write the complete graph again as '
+           'compact single-line JSON without indentation or line breaks, with short statements')
+
+
+def cut_off(text):
+    """Pretty-printed graphs with 25+ nodes ran past max_new_tokens; their retries need a different instruction."""
+    return not str(text).rstrip().rstrip('`').rstrip().endswith('}')
 
 
 def checklist_prompt(session):
@@ -312,7 +320,8 @@ def main():
                     result = to_graph(parse_json_object(text), it['session'], it['mode'])
                 except (ValueError, TypeError, KeyError) as error:
                     if it['attempt'] < args.attempts:
-                        retry.append(dict(it, attempt=it['attempt'] + 1, feedback=str(error)[:400], answer=text))
+                        feedback = CUT_OFF if cut_off(text) else str(error)[:400]
+                        retry.append(dict(it, attempt=it['attempt'] + 1, feedback=feedback, answer=text))
                         continue
                     append_jsonl(it['output'], record(it['session'], it['mode'], heuristic(it['session'], it['mode']), 'fallback',
                                                       model_name, args.attempts, text))
