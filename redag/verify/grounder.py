@@ -11,9 +11,14 @@ def load_image(path):
 
 
 def save_image(image, path):
+    import os
     from pathlib import Path
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray((image.detach().cpu().clamp(0, 1).permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)).save(path)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + '.tmp')
+    Image.fromarray((image.detach().cpu().clamp(0, 1).permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)).save(
+        partial, format=Image.registered_extensions().get(path.suffix.lower(), 'PNG'))
+    os.replace(partial, path)
 
 
 class Grounder:
