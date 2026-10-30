@@ -500,7 +500,7 @@ def cmd_status(args, s):
         prog = r.get('progress') or {}
         bar = f"{prog.get('done')}/{prog.get('total')} {prog.get('unit', '')}" if prog.get('total') else ''
         gpus = ','.join(map(str, r.get('gpu_ids') or [])) or 'cpu'
-        print(f"  [{gpus:>4}] {name:<28} {r.get('elapsed_hours', 0):5.1f} h done, ~{fmt_hours(r.get('left_hours', 0))} left "
+        print(f"  [{gpus:>4}] {name:<28} {max(r.get('elapsed_hours', 0), 0):5.1f} h done, ~{fmt_hours(r.get('left_hours', 0))} left "
               f"(ETA {fmt_time(r.get('eta'))})  {bar}")
     groups = {}
     for name, r in rows.items():
@@ -751,6 +751,52 @@ def cmd_bundle(args, s):
     return 0
 
 
+SYNC_INCLUDE = ('data/final/***', 'data/processed/graphs/***', 'data/processed/canvases/***',
+                'runs/sft/***', 'runs/rl/***', 'runs/eval/***')
+SYNC_EXCLUDE = ('resume/', 'resume.tmp/', 'resume.old/', '*.tmp', '*.incomplete', '__pycache__/')
+
+
+def marker_names(s):
+    """GPU-phase .done markers are shared; CPU-phase ones and the preflight stay per machine (each machine runs its own)."""
+    jobs, cpu_phase = build_jobs(s)
+    return sorted(j.name for j in jobs if j.name not in cpu_phase and j.name != 'preflight')
+
+
+def rsync(src, dst, ssh, filters, dry=False):
+    cmd = ['rsync', '-a', '--update', '--partial', '--timeout=120', '-e', ssh]
+    cmd += [f'--exclude={x}' for x in SYNC_EXCLUDE] + filters + [src, dst]
+    if dry:
+        cmd.insert(1, '-n')
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def cmd_sync(args, s):
+    """Exchange outputs with another machine that runs other jobs of the same pipeline (see EXTERNAL_JOBS).
+
+    Both directions, newest file wins (--update).  Outputs go first and the .done markers / stage files last, so a
+    machine never sees a finished marker before the files behind it."""
+    host, _, port = args.peer.partition(':')
+    ssh = f'ssh -p {port or 22} -i {args.key} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=30'
+    remote = f'{host}:{args.remote_root.rstrip("/")}/'
+    local = str(ROOT) + '/'
+    markers = [f'--include=runs/logs/{n}.done' for n in marker_names(s)] + [f'--include=runs/logs/{n}.log' for n in marker_names(s)]
+    dirs = ['--include=*/', '--prune-empty-dirs']
+    outputs = [*dirs, '--exclude=runs/logs/**', '--exclude=runs/rl/**/stage_checkpoints.json',
+               *[f'--include={p}' for p in SYNC_INCLUDE], '--exclude=*']
+    finals = [*dirs, *markers, '--include=runs/rl/**/stage_checkpoints.json', '--exclude=*']
+    while True:
+        started = time.time()
+        for label, src, dst in (('pull', remote, local), ('push', local, remote)):
+            for kind, filters in (('outputs', outputs), ('markers', finals)):
+                result = rsync(src, dst, ssh, filters, args.dry_run)
+                if result.returncode not in (0, 24):  # 24: files vanished during transfer (normal while jobs write)
+                    print(f'{time.strftime("%T")} {label} {kind} failed ({result.returncode}): {result.stderr.strip()[-300:]}', flush=True)
+        print(f'{time.strftime("%T")} sync with {args.peer} done in {time.time() - started:.0f}s', flush=True)
+        if not args.loop:
+            return 0
+        time.sleep(args.loop)
+
+
 def sha256_file(path):
     digest = hashlib.sha256()
     with open(path, 'rb') as stream:
@@ -858,6 +904,12 @@ def main(argv=None):
     bundle.add_argument('--with-adapters', action='store_true')
     bundle.add_argument('--split', type=int, default=0, help='part size in MiB (e.g. 3900 for netdisk limits)')
     bundle.add_argument('--no-verify', action='store_true')
+    sync = sub.add_parser('sync', help='exchange outputs with another machine running other jobs (EXTERNAL_JOBS)')
+    sync.add_argument('--peer', required=True, help='root@host:port of the other machine (key-based ssh)')
+    sync.add_argument('--key', default=os.path.expanduser('~/.ssh/redag_sync'))
+    sync.add_argument('--remote-root', default=str(ROOT))
+    sync.add_argument('--loop', type=int, default=0, help='repeat every N seconds')
+    sync.add_argument('--dry-run', action='store_true')
     sub.add_parser('is-running', help='exit status 0 if a scheduler is running')
     notify = sub.add_parser('notify-test', help='send a test message to NOTIFY_URL')
     notify.add_argument('text', nargs='?', default='test message')
@@ -878,7 +930,7 @@ def main(argv=None):
         print('sent' if ok else 'not sent (is NOTIFY_URL set?)')
         return 0 if ok else 1
     return {'run': cmd_run, 'status': cmd_status, 'stop': cmd_stop, 'plan': cmd_plan, 'list': cmd_list,
-            'logs': cmd_logs, 'reset': cmd_reset}[args.command](args, s)
+            'logs': cmd_logs, 'reset': cmd_reset, 'sync': cmd_sync}[args.command](args, s)
 
 
 if __name__ == '__main__':
