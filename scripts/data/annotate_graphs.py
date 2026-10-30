@@ -47,6 +47,13 @@ CUT_OFF = ('the answer was cut off before the JSON was complete (answer length l
            'compact single-line JSON without indentation or line breaks, with short statements')
 
 
+def reason(error):
+    """Validation error without ids, for the per-batch counts in the log."""
+    text = re.sub(r"'[^']*'|\b\w*\d\w*\b", '#', str(error))
+    text = re.split(r'[:\[]', text)[0].strip()[:60]
+    return text if text.strip('# ') else f'{type(error).__name__} {str(error)[:40]}'
+
+
 def cut_off(text):
     """Pretty-printed graphs with 25+ nodes ran past max_new_tokens; their retries need a different instruction."""
     return not str(text).rstrip().rstrip('`').rstrip().endswith('}')
@@ -364,11 +371,12 @@ def main():
             streak += 1
             if limit < full and streak >= 3:  # an out-of-memory batch (often long retries) must not halve the rest of the run
                 limit, streak = min(full, limit * 2), 0
-            retry = []
+            retry, reasons = [], Counter()
             for it, text in zip(batch, outputs):
                 try:
                     result = to_graph(parse_json_object(text), it['session'], it['mode'])
                 except (ValueError, TypeError, KeyError) as error:
+                    reasons['cut off' if cut_off(text) else reason(error)] += 1
                     if it['attempt'] < args.attempts:
                         feedback = CUT_OFF if cut_off(text) else str(error)[:400]
                         retry.append(dict(it, attempt=it['attempt'] + 1, feedback=feedback, answer=text))
@@ -383,7 +391,8 @@ def main():
                 counts[status] += 1
                 done += 1
             queue.extendleft(reversed(retry))  # next batch: the retries plus the next sessions of similar size
-            log(f'{done}/{total} done {dict(counts)}; {len(retry)} to retry, {len(queue)} queued ({mode}, batch {limit})')
+            log(f'{done}/{total} done {dict(counts)}; {len(retry)} to retry, {len(queue)} queued ({mode}, batch {limit})'
+                + (f'; invalid answers: {dict(reasons)}' if reasons else ''))
             report(done, total, 'sessions')
     log(f'finished {dict(counts)}')
 

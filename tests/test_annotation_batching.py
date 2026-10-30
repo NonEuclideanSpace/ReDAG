@@ -123,3 +123,10 @@ def test_grouped_decode_attention_matches_sdpa():
                            sdpa_attention_forward(module, prefill, key, value, causal, scaling=0.1)[0])
     finally:
         type(ALL_ATTENTION_FUNCTIONS).register('sdpa', original)
+
+
+def test_rejection_reasons_are_counted_without_ids():
+    import annotate_graphs as ag
+    assert ag.reason(ValueError("missing checklist ids: ['q1', 'q2']")) == 'missing checklist ids'
+    assert ag.reason(ValueError('duplicate node id q4')) == ag.reason(ValueError('duplicate node id e12')) == 'duplicate node id #'
+    assert ag.reason(ValueError('node q3 (entity) needs an entity_phrase')) == 'node # (entity) needs an entity_phrase'
