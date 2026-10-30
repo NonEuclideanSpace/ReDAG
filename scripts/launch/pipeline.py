@@ -992,7 +992,8 @@ def cmd_sync(args, s):
     local = str(ROOT) + '/'
     per_machine = sorted(set(build_jobs(s)[1]) | {'preflight', 'wiring_check'})
     markers = ([f'--exclude=runs/logs/{n}.{ext}' for n in per_machine for ext in ('done', 'log')]
-               + ['--include=runs/logs/*.done', '--include=runs/logs/*.log'])
+               + [f'--exclude=runs/state/jobs/{n}.progress' for n in per_machine]
+               + ['--include=runs/logs/*.done', '--include=runs/logs/*.log', '--include=runs/state/jobs/*.progress'])
     dirs = ['--include=*/', '--prune-empty-dirs']
     outputs = [*dirs, '--exclude=runs/logs/**', '--exclude=runs/rl/**/stage_checkpoints.json',
                *[f'--include={p}' for p in SYNC_INCLUDE], '--exclude=*']
