@@ -300,6 +300,7 @@ def main():
         group = sorted((it for it in items if it[1] == mode), key=lambda it: -size(it[0]))
         queue = deque(dict(session=s, mode=m, output=o, attempt=1, feedback=None, answer=None) for s, m, o in group)
         limit = args.batch_size if mode != 'instruction' else max(1, args.batch_size // 2)  # image prompts are longer
+        full, streak = limit, 0
         while queue:
             batch = [queue.popleft() for _ in range(min(limit, len(queue)))]
             prepared = [messages(it['session'], it['mode'], args.inventory, it['feedback'], it['answer']) for it in batch]
@@ -310,10 +311,13 @@ def main():
                     raise
                 import torch
                 torch.cuda.empty_cache()
-                limit = max(1, limit // 2)
+                limit, streak = max(1, limit // 2), 0
                 queue.extendleft(reversed(batch))
                 log(f'out of memory: batch size {mode} -> {limit}')
                 continue
+            streak += 1
+            if limit < full and streak >= 3:  # an out-of-memory batch (often long retries) must not halve the rest of the run
+                limit, streak = min(full, limit * 2), 0
             retry = []
             for it, text in zip(batch, outputs):
                 try:

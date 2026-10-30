@@ -339,7 +339,7 @@ def execute(spec_path):
 
 class Scheduler:
     def __init__(self, jobs, runs, cwd, gpus=None, cpu_slots=None, poll=5.0, notifier=None, gpu_free_mib=2000,
-                 code_version='', retry_failed=False, log=None, max_hours=None, tick=None, tick_every=600.0):
+                 code_version='', retry_failed=False, log=None, max_hours=None, tick=None, tick_every=600.0, claim=None):
         self.order = validate(jobs)
         self.jobs = {j.name: j for j in jobs}
         self.runs, self.cwd = Path(runs), str(cwd)
@@ -358,6 +358,7 @@ class Scheduler:
         self.stopping = False
         self.retry_delay = 60.0
         self.tick, self.tick_every, self.last_tick = tick, tick_every, 0.0  # e.g. the health report
+        self.claim = claim  # name -> bool, asked right before a start (jobs shared with other machines; None: always run)
         self.log = log or (lambda text: print(time.strftime('[%F %T] ') + text, flush=True))
         self.gpu_info, self.foreign = [], set()
 
@@ -553,6 +554,12 @@ class Scheduler:
                 states[name] = 'ready'
         return states
 
+    def held_by_condition(self, name):
+        """Held by a condition that can change from outside (another machine's job, a claim, a decision gate, an RL
+        checkpoint): keep waiting for it instead of ending as stalled.  Not on a machine that could never run the job."""
+        job = self.jobs[name]
+        return job.ready is not None and job.gpus <= len(self.gpu_list()) and not safe_call(job.ready)
+
     def priorities(self, est):
         return bottom_levels(list(self.jobs.values()), {n: est[n] / HOUR for n in self.jobs})
 
@@ -567,6 +574,9 @@ class Scheduler:
         upcoming = self.upcoming(states, est, level, now)
         starts = choose([(self.jobs[n], est[n], level[n]) for n in ready], len(free), running, now, cpu_free, upcoming)
         for job in starts:
+            if self.claim is not None and not self.claim(job.name):
+                self.log(f'{job.name} was claimed by another machine')
+                continue
             take = free[:job.gpus]
             free = free[job.gpus:]
             self.launch(job.name, take)
@@ -686,6 +696,9 @@ class Scheduler:
         (self.state / 'control').unlink(missing_ok=True)
         self.refresh_gpus()
         self.adopt()
+        for name in list(self.running):  # jobs started before sharing was configured: record that they run here
+            if self.claim is not None and not self.claim(name):
+                self.log(f'WARNING: {name} runs here but another machine claimed it')
         started = time.time()
         self.log(f'scheduler started: {len(self.gpu_list())} GPU(s) {self.gpu_list()}, {len(self.jobs)} jobs, code {self.code_version}')
         first = True
@@ -733,7 +746,8 @@ class Scheduler:
                 if control == 'drain':
                     outcome = 'drained'
                     break
-                if not any(v == 'ready' or (v == 'held' and self.retry_at.get(n, 0) > now) for n, v in states.items()):
+                if not any(v == 'ready' or (v == 'held' and (self.retry_at.get(n, 0) > now or self.held_by_condition(n)))
+                           for n, v in states.items()):
                     outcome = 'stalled'  # only failed / blocked jobs, or jobs this machine cannot run, are left
                     break
             time.sleep(self.poll)
