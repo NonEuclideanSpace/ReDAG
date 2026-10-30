@@ -264,14 +264,10 @@ def main():
     wanted = set(Path(args.ids).read_text().split()) if args.ids else None
     planner = None if args.heuristic else load_model(args)
     model_name = 'heuristic' if args.heuristic else args.model
+    from collections import Counter, deque
+    from redag.models.planner import parse_json_object
     from redag.progress import report
-    grand_done, grand_total = 0, 0
-    for path in args.sessions:  # total for progress reports (session files are small)
-        out = Path(args.output_dir) / (Path(path).stem + ('' if args.num_shards == 1 else f'.shard{args.shard}of{args.num_shards}') + '.jsonl')
-        finished = done_ids(out)
-        mine = [s['id'] for i, s in enumerate(iter_jsonl(path)) if i % args.num_shards == args.shard]
-        mine = [x for x in mine if x not in finished and (wanted is None or x in wanted)]
-        grand_total += len(mine[:args.limit] if args.limit else mine)
+    items = []  # (session, mode, output file) still to annotate, over every session file of this shard
     for path in args.sessions:
         name = Path(path).stem + ('' if args.num_shards == 1 else f'.shard{args.shard}of{args.num_shards}')
         output = Path(args.output_dir) / f'{name}.jsonl'
@@ -281,45 +277,56 @@ def main():
         todo = [s for s in todo if s['id'] not in finished and (wanted is None or s['id'] in wanted)]
         todo = todo[:args.limit] if args.limit else todo
         log(f'{path}: {len(todo)} sessions to annotate -> {output} ({len(finished)} already done)')
-        counts = {'ok': 0, 'repaired': 0, 'fallback': 0}
-        for start in range(0, len(todo), args.batch_size):
-            batch = todo[start:start + args.batch_size]
-            modes = ['checklist' if s.get('checklist') else 'instruction' if s.get('turns') else 'decompose' for s in batch]
-            if args.heuristic:
-                for session, mode in zip(batch, modes):
-                    append_jsonl(output, record(session, mode, heuristic(session, mode), 'fallback', model_name, 0))
-                    counts['fallback'] += 1
-                continue
-            pending = list(range(len(batch)))
-            feedback, answers = {}, {}
-            for attempt in range(1, args.attempts + 1):
-                if not pending:
-                    break
-                prepared = [messages(batch[i], modes[i], args.inventory, feedback.get(i), answers.get(i)) for i in pending]
+        items += [(s, 'checklist' if s.get('checklist') else 'instruction' if s.get('turns') else 'decompose', output) for s in todo]
+    counts, done, total = Counter(), 0, len(items)
+    if args.heuristic:
+        for session, mode, output in items:
+            append_jsonl(output, record(session, mode, heuristic(session, mode), 'fallback', model_name, 0))
+        log(f'{total} heuristic graphs written')
+        return
+    # A generate() call lasts as long as its longest answer, so batches hold sessions of similar size (largest first),
+    # stay full (failed answers are retried inside the next batch instead of in a small batch of their own) and never
+    # mix text-only and image sessions.  An out-of-memory batch is split in half and retried.
+    size = lambda session: len(json.dumps({k: session.get(k) for k in ('prompt', 'checklist', 'turns', 'hints')}, ensure_ascii=False))
+    for mode in ('checklist', 'decompose', 'instruction'):
+        group = sorted((it for it in items if it[1] == mode), key=lambda it: -size(it[0]))
+        queue = deque(dict(session=s, mode=m, output=o, attempt=1, feedback=None, answer=None) for s, m, o in group)
+        limit = args.batch_size if mode != 'instruction' else max(1, args.batch_size // 2)  # image prompts are longer
+        while queue:
+            batch = [queue.popleft() for _ in range(min(limit, len(queue)))]
+            prepared = [messages(it['session'], it['mode'], args.inventory, it['feedback'], it['answer']) for it in batch]
+            try:
                 outputs = generate(planner, [p[0] for p in prepared], [p[1] for p in prepared], args.max_new_tokens)
-                still = []
-                for i, text in zip(pending, outputs):
-                    answers[i] = text
-                    try:
-                        from redag.models.planner import parse_json_object
-                        result = to_graph(parse_json_object(text), batch[i], modes[i])
-                    except (ValueError, TypeError, KeyError) as error:
-                        feedback[i] = str(error)[:400]
-                        still.append(i)
+            except Exception as error:  # torch.OutOfMemoryError without importing torch here
+                if 'out of memory' not in str(error).lower() or limit == 1:
+                    raise
+                import torch
+                torch.cuda.empty_cache()
+                limit = max(1, limit // 2)
+                queue.extendleft(reversed(batch))
+                log(f'out of memory: batch size {mode} -> {limit}')
+                continue
+            retry = []
+            for it, text in zip(batch, outputs):
+                try:
+                    result = to_graph(parse_json_object(text), it['session'], it['mode'])
+                except (ValueError, TypeError, KeyError) as error:
+                    if it['attempt'] < args.attempts:
+                        retry.append(dict(it, attempt=it['attempt'] + 1, feedback=str(error)[:400], answer=text))
                         continue
-                    status = 'ok' if attempt == 1 else 'repaired'
-                    append_jsonl(output, record(batch[i], modes[i], result, status, model_name, attempt))
-                    counts[status] += 1
-                pending = still
-            for i in pending:
-                append_jsonl(output, record(batch[i], modes[i], heuristic(batch[i], modes[i]), 'fallback', model_name,
-                                            args.attempts, answers.get(i, '')))
-                counts['fallback'] += 1
-            log(f'{name}: {start + len(batch)}/{len(todo)} done {counts}')
-            grand_done += len(batch)
-            report(grand_done, grand_total, 'sessions')
-        log(f'{name}: finished {counts}')
-
+                    append_jsonl(it['output'], record(it['session'], it['mode'], heuristic(it['session'], it['mode']), 'fallback',
+                                                      model_name, args.attempts, text))
+                    counts['fallback'] += 1
+                    done += 1
+                    continue
+                status = 'ok' if it['attempt'] == 1 else 'repaired'
+                append_jsonl(it['output'], record(it['session'], it['mode'], result, status, model_name, it['attempt']))
+                counts[status] += 1
+                done += 1
+            queue.extendleft(reversed(retry))  # next batch: the retries plus the next sessions of similar size
+            log(f'{done}/{total} done {dict(counts)}; {len(retry)} to retry, {len(queue)} queued ({mode}, batch {limit})')
+            report(done, total, 'sessions')
+    log(f'finished {dict(counts)}')
 
 if __name__ == '__main__':
     main()
