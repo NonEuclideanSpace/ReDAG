@@ -369,8 +369,8 @@ def main():
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--max_new_tokens', type=int, default=4096)
-    parser.add_argument('--max_new_tokens_decompose', type=int, default=6144,
-                        help='long requests decompose into up to 40 conditions with statements: ~4-5k tokens')
+    parser.add_argument('--max_new_tokens_text', type=int, default=6144,
+                        help='checklists with 40 items and long requests (up to 40 conditions with statements) need ~4-5k tokens')
     parser.add_argument('--attempts', type=int, default=3)
     parser.add_argument('--inventory', type=int, default=24)
     parser.add_argument('--limit', type=int, help='first N sessions per file (after sharding)')
@@ -407,8 +407,8 @@ def main():
     # mix text-only and image sessions.  An out-of-memory batch is split in half and retried.
     size = lambda session: len(json.dumps({k: session.get(k) for k in ('prompt', 'checklist', 'turns', 'hints')}, ensure_ascii=False))
     # text-only modes share one queue (a few leftover retries of one mode never run as a batch of their own)
-    token_limit = {'checklist': args.max_new_tokens, 'decompose': max(args.max_new_tokens, args.max_new_tokens_decompose),
-                   'instruction': args.max_new_tokens}
+    text_limit = max(args.max_new_tokens, args.max_new_tokens_text)
+    token_limit = {'checklist': text_limit, 'decompose': text_limit, 'instruction': args.max_new_tokens}
     for mode, modes in (('text', ('checklist', 'decompose')), ('instruction', ('instruction',))):
         group = sorted((it for it in items if it[1] in modes), key=lambda it: -size(it[0]))
         queue = deque(dict(session=s, mode=m, output=o, attempt=1, feedback=None, answer=None) for s, m, o in group)
