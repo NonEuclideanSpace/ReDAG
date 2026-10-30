@@ -104,3 +104,14 @@ def test_sync_compares_modification_times_to_the_nanosecond(monkeypatch):
     monkeypatch.setattr(pipeline.subprocess, 'run', lambda cmd, **kwargs: seen.append(cmd))
     pipeline.rsync('a/', 'b/', 'ssh', [])
     assert '--update' in seen[0] and '--modify-window=-1' in seen[0]
+
+
+def test_sync_markers_follow_jobs_added_later(monkeypatch, tmp_path):
+    for name in ('CANVAS_SHARDS', 'RS_SHARDS'):
+        monkeypatch.delenv(name, raising=False)
+    calls = []
+    monkeypatch.setattr(pipeline, 'rsync', lambda src, dst, ssh, filters, dry=False: calls.append(filters) or type('R', (), {'returncode': 0})())
+    pipeline.cmd_sync(type('A', (), {'peer': 'root@h:1', 'key': 'k', 'remote_root': '/r', 'loop': 0, 'dry_run': False})(), pipeline.settings())
+    finals = calls[1]
+    assert '--include=runs/logs/*.done' in finals and '--exclude=runs/logs/preflight.done' in finals
+    assert '--exclude=runs/logs/download_models.done' in finals and finals.index('--exclude=runs/logs/preflight.done') < finals.index('--include=runs/logs/*.done')

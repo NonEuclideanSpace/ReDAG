@@ -955,12 +955,6 @@ SYNC_INCLUDE = ('data/final/***', 'data/processed/graphs/***', 'data/processed/c
 SYNC_EXCLUDE = ('resume/', 'resume.tmp/', 'resume.old/', '*.tmp', '*.incomplete', '__pycache__/')
 
 
-def marker_names(s):
-    """GPU-phase .done markers are shared; CPU-phase ones and the preflight stay per machine (each machine runs its own)."""
-    jobs, cpu_phase = build_jobs(s)
-    return sorted(j.name for j in jobs if j.name not in cpu_phase and j.name != 'preflight')
-
-
 def rsync(src, dst, ssh, filters, dry=False):
     # --modify-window=-1: compare modification times to the nanosecond.  With the default (whole seconds) a file that
     # its writer appended to within the second after the other direction copied it looked equally old but different
@@ -982,7 +976,9 @@ def cmd_sync(args, s):
     ssh = f'ssh -p {port or 22} -i {args.key} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=30'
     remote = f'{host}:{args.remote_root.rstrip("/")}/'
     local = str(ROOT) + '/'
-    markers = [f'--include=runs/logs/{n}.done' for n in marker_names(s)] + [f'--include=runs/logs/{n}.log' for n in marker_names(s)]
+    per_machine = sorted(set(build_jobs(s)[1]) | {'preflight', 'wiring_check'})
+    markers = ([f'--exclude=runs/logs/{n}.{ext}' for n in per_machine for ext in ('done', 'log')]
+               + ['--include=runs/logs/*.done', '--include=runs/logs/*.log'])
     dirs = ['--include=*/', '--prune-empty-dirs']
     outputs = [*dirs, '--exclude=runs/logs/**', '--exclude=runs/rl/**/stage_checkpoints.json',
                *[f'--include={p}' for p in SYNC_INCLUDE], '--exclude=*']
