@@ -299,7 +299,7 @@ def main():
     for mode in ('checklist', 'decompose', 'instruction'):
         group = sorted((it for it in items if it[1] == mode), key=lambda it: -size(it[0]))
         queue = deque(dict(session=s, mode=m, output=o, attempt=1, feedback=None, answer=None) for s, m, o in group)
-        limit = args.batch_size if mode != 'instruction' else max(1, args.batch_size // 2)  # image prompts are longer
+        limit = args.batch_size  # image prompts (~1k image tokens) are no longer than big checklists; OOM halves the batch
         full, streak = limit, 0
         while queue:
             batch = [queue.popleft() for _ in range(min(limit, len(queue)))]

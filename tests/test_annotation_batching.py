@@ -49,7 +49,7 @@ def test_batches_are_full_homogeneous_and_retries_are_merged(tmp_path, monkeypat
     for batch in batches:  # never mixes text-only checklist sessions with image (MagicBrush) sessions
         assert len({b[0] for b in batch}) == 1
     assert max(len(b) for b in batches if b[0].startswith('c')) == 2  # 4 halved after the out-of-memory error
-    assert max(len(b) for b in batches if b[0].startswith('m')) <= 2  # image batches use half the text batch size
+    assert max(len(b) for b in batches if b[0].startswith('m')) <= 3
     assert batches[0][0] == 'c4'  # largest checklist first
 
 
