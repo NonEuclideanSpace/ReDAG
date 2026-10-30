@@ -110,7 +110,7 @@ bash scripts/launch/go.sh status     # 看进度：每张卡在跑什么、进�
    ssh-keygen -t ed25519 -N '' -f ~/.ssh/redag_sync    # 把 ~/.ssh/redag_sync.pub 追加到第二台的 ~/.ssh/authorized_keys
    echo "SYNC_PEER=root@connect.<地区>.seetacloud.com:<端口>" >> local.env    # 第二台的 SSH 登录指令里的地址和端口
    ```
-4. 两台机器都执行 `go.sh`。对方跑完的任务一同步过来，本机的下游任务就会自动开始。
+4. 两台机器都执行 `go.sh`。对方跑完的任务一同步过来，本机的下游任务就会自动开始。三台以上时，主机的 `SYNC_PEER` 写成空格分隔的多个地址，主机作为中转和每台各同步一路。
 5. **谁先空谁来跑**（可选，推荐）：`SHARED_JOBS` 里的任务两台都能跑，哪台先空出卡就"认领"哪个，认领记录放在第二台上（第一台通过同一把 ssh 密钥去认领），所以同一个任务不会被跑两次。`SHARED_JOBS` 优先于 `EXTERNAL_JOBS`/`LOCAL_JOBS`。
    ```bash
    # 两台 local.env 写同一行；只在主机上加 CLAIMS_HOST（= 第二台的地址，和 SYNC_PEER 一样）
