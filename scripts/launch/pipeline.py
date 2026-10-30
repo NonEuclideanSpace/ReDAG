@@ -269,13 +269,17 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
                              soft=(('rl_main', RL_STAGE_SHARE[stage]),))
             else:
                 source, deps = pre_rl, ('exp3_stage_file', 'check_data_phase2') + (('sft_controller', 'sft_editor') if stage == 'sft' else ())
+            reuse = stage == 'sft' and '1' in s['EXPERIMENTS'] and s['EXP1_SHARDS'] == n
             for k in range(n):
                 name = f'exp3_{stage}_s{k}'
                 parts.append(name)
+                # experiment 1's redag_full sessions are exactly the SFT stage at seed 0 (same weights, data, budget, seed)
+                extra_args = ['--reuse_cases', out / f'exp1.s{k}.cases.jsonl'] if reuse else []
                 add(name, evaluate + budget + ['--exp_id', 3, '--data', data / 'eval_main.jsonl', '--stage_checkpoints', source,
                                                '--stages', stage, *devices, '--shard', k, '--num_shards', n,
-                                               '--output', out / f'exp3_{stage}.s{k}.json'],
-                    gpus=eval_gpus, deps=deps, hours=23.0 / n * eval_gpus, group=g, family='exp3', **extra)
+                                               '--output', out / f'exp3_{stage}.s{k}.json', *extra_args],
+                    gpus=eval_gpus, deps=deps + ((f'exp1_s{k}',) if reuse else ()),
+                    hours=23.0 / n * eval_gpus * (2 / 3 if reuse else 1), group=g, family='exp3', **extra)
         add('merge_exp3', [py, 'scripts/merge_eval_results.py', '--inputs',
                            *[out / f'exp3_{stage}.s{k}.json' for stage in STAGES for k in range(n)], '--output', out / 'exp3.json'],
             deps=tuple(parts), group=g)
@@ -284,15 +288,27 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
     return jobs, cpu_phase
 
 
+GATES = {  # HOLD="exp3 after_rl" in local.env: these jobs wait until `go.sh release <gate>` (HANDOFF.md section 2)
+    'exp3': lambda name: name.startswith('exp3_') and name != 'exp3_stage_file',
+    'after_rl': lambda name: name.startswith(('rl_exp2_', 'exp2_eval', 'exp3_ctrl_rl', 'exp3_edit_rl', 'exp3_alternating_rl')),
+}
+
 MILESTONES = {
     'plan_annotation': 'CPU data phase finished: switch the instance to GPU mode and run go.sh',
     'check_data_phase2': 'all data built and checked (graphs, sets, canvases, RL states)',
     'sft_controller': 'all supervised stages finished (editor, planner, rejection sampling, controller)',
-    'rl_main': 'main alternating RL finished; experiment-3 RL stages can all run now',
+    'rl_main': 'main alternating RL finished; decide where the remaining experiments run, then `go.sh release after_rl` '
+               '(experiment-3 RL stages and the experiment-2 RL runs wait for it if HOLD contains after_rl)',
+    'exp1_s0': 'first experiment-1 shard finished: check `go.sh health` (eval/exp1_effect), then `go.sh release exp3` '
+               'to start experiment 3 if HOLD contains exp3',
     'merge_exp1': 'experiment 1 merged: runs/eval/exp1.json', 'exp2_eval': 'experiment 2 finished: runs/eval/exp2.json',
     'merge_exp3': 'experiment 3 merged: runs/eval/exp3.json (+ blind pairs for human rating)',
     'report': 'pipeline finished: runs/RESULTS.md',
 }
+
+
+def gate_open(runs, gate):
+    return (Path(runs) / 'state' / 'release' / gate).exists()
 
 
 def stage_ready(path, stage):
@@ -439,6 +455,14 @@ def make_scheduler(args, s, quiet=False, gpus=None):
         for job in jobs:
             job.soft = tuple((d, f) for d, f in job.soft if d in keep)
         cpu_phase = [n for n in cpu_phase if n in keep]
+    holds = [g for g in env('HOLD', '').replace(',', ' ').split() if g in GATES]
+    for job in jobs:  # decision points: held until a person releases them
+        gates = tuple(g for g in holds if GATES[g](job.name))
+        if gates:
+            def ready(previous=job.ready, gates=gates):
+                return all(gate_open(s['RUNS'], g) for g in gates) and (previous is None or previous())
+            job.ready = ready
+            job.waiting_for = f"your decision (go.sh release {' and '.join(gates)})" + (f'; then {job.waiting_for}' if job.waiting_for else '')
     # Several machines, one pipeline (HANDOFF.md section 4): the same regex is EXTERNAL_JOBS on the main machine and
     # LOCAL_JOBS on a helper.  External jobs are never started here; their dependents wait until `pipeline.py sync`
     # brings their outputs and .done marker.  The CPU data phase and the preflight always run on every machine.
@@ -448,8 +472,11 @@ def make_scheduler(args, s, quiet=False, gpus=None):
         if shared and ((external and re.search(external, job.name)) or (local_only and not re.search(local_only, job.name))):
             job.ready, job.waiting_for = (lambda: False), 'runs on another machine'
     orch.MILESTONES.update(MILESTONES)
+    import health
+    notifier = Notifier(os.environ.get('NOTIFY_URL'), log=print)
     scheduler = Scheduler(jobs, s['RUNS'], ROOT, gpus=gpus, cpu_slots=int(env('CPU_SLOTS', 0)) or (min(8, max(4, (os.cpu_count() or 8) // 2)) if info else 1),
-                          notifier=Notifier(os.environ.get('NOTIFY_URL'), log=print), gpu_free_mib=float(env('GPU_FREE_MIB', 2000)),
+                          notifier=notifier, gpu_free_mib=float(env('GPU_FREE_MIB', 2000)),
+                          tick=lambda: health.refresh(ROOT, s['RUNS'], notifier), tick_every=float(env('HEALTH_EVERY_MIN', 10)) * 60,
                           code_version=code_version(), retry_failed=getattr(args, 'retry_failed', False),
                           max_hours=float(env('MAX_HOURS', 0)) or None, log=None if not quiet else (lambda text: None))
     return scheduler, jobs, cpu_phase, info
@@ -617,6 +644,24 @@ def cmd_stop(args, s):
                 except ProcessLookupError:
                     pass
     print('no scheduler running' + (f'; terminated {stopped} job(s)' if stopped else ''))
+    return 0
+
+
+def cmd_health(args, s):
+    import health
+    report, worse = health.refresh(ROOT, s['RUNS'], Notifier(os.environ.get('NOTIFY_URL'), log=print) if args.notify else None)
+    print(health.markdown(report))
+    return 0
+
+
+def cmd_release(args, s):
+    if args.gate not in GATES:
+        print(f'unknown gate {args.gate}; gates: {", ".join(GATES)}')
+        return 1
+    folder = Path(s['RUNS']) / 'state' / 'release'
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / args.gate).write_text(time.strftime('%F %T') + '\n')
+    print(f'released {args.gate}: held jobs start on this machine (and on a synced peer within a few minutes)')
     return 0
 
 
@@ -802,7 +847,7 @@ def cmd_sync(args, s):
     dirs = ['--include=*/', '--prune-empty-dirs']
     outputs = [*dirs, '--exclude=runs/logs/**', '--exclude=runs/rl/**/stage_checkpoints.json',
                *[f'--include={p}' for p in SYNC_INCLUDE], '--exclude=*']
-    finals = [*dirs, *markers, '--include=runs/rl/**/stage_checkpoints.json', '--exclude=*']
+    finals = [*dirs, *markers, '--include=runs/rl/**/stage_checkpoints.json', '--include=runs/state/release/*', '--exclude=*']
     while True:
         started = time.time()
         for label, src, dst in (('pull', remote, local), ('push', local, remote)):
@@ -929,6 +974,10 @@ def main(argv=None):
     sync.add_argument('--remote-root', default=str(ROOT))
     sync.add_argument('--loop', type=int, default=0, help='repeat every N seconds')
     sync.add_argument('--dry-run', action='store_true')
+    health_parser = sub.add_parser('health', help='early-warning report (runs/HEALTH.md)')
+    health_parser.add_argument('--notify', action='store_true')
+    release = sub.add_parser('release', help='open a decision gate (HOLD): exp3 | after_rl')
+    release.add_argument('gate')
     sub.add_parser('is-running', help='exit status 0 if a scheduler is running')
     notify = sub.add_parser('notify-test', help='send a test message to NOTIFY_URL')
     notify.add_argument('text', nargs='?', default='test message')
@@ -949,7 +998,7 @@ def main(argv=None):
         print('sent' if ok else 'not sent (is NOTIFY_URL set?)')
         return 0 if ok else 1
     return {'run': cmd_run, 'status': cmd_status, 'stop': cmd_stop, 'plan': cmd_plan, 'list': cmd_list,
-            'logs': cmd_logs, 'reset': cmd_reset, 'sync': cmd_sync}[args.command](args, s)
+            'logs': cmd_logs, 'reset': cmd_reset, 'sync': cmd_sync, 'health': cmd_health, 'release': cmd_release}[args.command](args, s)
 
 
 if __name__ == '__main__':
