@@ -135,6 +135,12 @@ def loss_trend(path, name):
 
 def sft(runs):
     out = [loss_trend(runs / 'sft' / kind / 'metrics.jsonl', f'sft/{kind}') for kind in ('editor', 'planner', 'controller')]
+    heldout = load(runs / 'eval' / 'editor_sft_dev.json')
+    if heldout and heldout.get('summary'):
+        e = heldout['summary']
+        out.append(item('sft/editor_heldout', '2 SFT', OK if e['relative_change'] < 0 else WARN,
+                        f"MagicBrush dev flow loss base {e['base_loss']:.4f} -> SFT {e['sft_loss']:.4f} ({e['relative_change']:+.1%}), "
+                        f"lower on {e['sft_lower_share']:.0%} of samples", '' if e['relative_change'] < 0 else 'the editor SFT does not lower the held-out loss'))
     zero, tuned = load(runs / 'eval' / 'planner_zero_shot.json'), load(runs / 'eval' / 'planner_sft.json')
     if zero and tuned:
         a, b = zero['summary'].get('node_f1'), tuned['summary'].get('node_f1')

@@ -186,6 +186,9 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
     add('sft_editor', [py, 'scripts/run_sft_editor.py', '--data', data / 'editor_sft_train.jsonl', '--output', sft / 'editor',
                        '--model', s['EDITOR'], '--device', 'cuda:0', '--epochs', s['EDITOR_EPOCHS'], '--checkpoint_minutes', s['CKPT_MINUTES']],
         gpus=1, deps=('prep_magicbrush_train',) if 'train' in s['MB_SPLITS'] else (), hours=6.0, group=g)
+    add('eval_editor_sft', [py, 'scripts/eval_editor_sft.py', '--data', data / 'editor_sft_dev.jsonl', '--model', s['EDITOR'],
+                            '--adapter', sft / 'editor', '--device', 'cuda:0', '--output', out / 'editor_sft_dev.json'],
+        gpus=1, deps=('sft_editor',), hours=0.15, group=g)
     add('sft_planner', [py, 'scripts/run_sft_planner.py', '--data', data / 'planner_sft.jsonl', '--output', sft / 'planner',
                         '--model', s['PLANNER'], '--device', 'cuda:0', '--epochs', s['PLANNER_EPOCHS'], '--checkpoint_minutes', s['CKPT_MINUTES']],
         gpus=1, deps=('build_sets',), hours=4.0, group=g)
@@ -284,7 +287,8 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
         add('merge_exp3', [py, 'scripts/merge_eval_results.py', '--inputs',
                            *[out / f'exp3_{stage}.s{k}.json' for stage in STAGES for k in range(n)], '--output', out / 'exp3.json'],
             deps=tuple(parts), group=g)
-    finals = [j.name for j in jobs if j.name in ('merge_exp1', 'exp2_eval', 'merge_exp3', 'eval_planner_zero_shot', 'eval_planner_sft', 'rl_main')]
+    finals = [j.name for j in jobs if j.name in ('merge_exp1', 'exp2_eval', 'merge_exp3', 'eval_planner_zero_shot', 'eval_planner_sft',
+                                                 'eval_editor_sft', 'rl_main')]
     add('report', me + ['_report'], deps=tuple(finals), group='7 report')
     return jobs, cpu_phase
 
