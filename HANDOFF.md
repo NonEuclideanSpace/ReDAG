@@ -145,6 +145,8 @@ bash scripts/launch/go.sh status     # 看进度：每张卡在跑什么、进�
 | 实例关机、迁移、重启 | 开机后执行 `go.sh`，所有任务从检查点续跑 |
 | 磁盘不足 | `df -h /root/autodl-tmp`，可以删 `runs/wiring`、`runs/smoke`、`/root/autodl-tmp/bundles` |
 | GitHub 拉不动 | 先 `source /etc/network_turbo` |
+| 图标注慢、爆显存 | 日志里每批有一行 `generate:`（每步毫秒数、答案长度）。爆显存时 batch 自动减半，连续 3 批成功后再加回去；也可以在 `local.env` 里调 `ANNOTATE_BATCH`（96G 用 40，80G 用 24）后 `go.sh reload`。解码注意力的加速可以用 `ANNOTATE_GQA_DECODE=0` 关掉 |
+| 改了代码，想让正在跑的任务用上 | `git pull` 之后执行 `go.sh restart 任务名`：从检查点续跑，不算一次失败 |
 
 ---
 
