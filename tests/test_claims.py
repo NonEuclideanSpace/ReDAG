@@ -97,3 +97,10 @@ def test_scheduler_skips_jobs_claimed_elsewhere_and_waits_for_other_machines(tmp
     flag.write_text('1')
     thread.join(30)
     assert result['outcome'] == 'complete' and started.read_text() == 'mine '
+
+
+def test_sync_compares_modification_times_to_the_nanosecond(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pipeline.subprocess, 'run', lambda cmd, **kwargs: seen.append(cmd))
+    pipeline.rsync('a/', 'b/', 'ssh', [])
+    assert '--update' in seen[0] and '--modify-window=-1' in seen[0]
