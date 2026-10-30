@@ -139,6 +139,7 @@ def main():
         report['rl_train_dev_disjoint'] = not overlap
         failed |= bool(overlap)
         log(f'rl train/dev disjoint: {not overlap}')
+    folder.mkdir(parents=True, exist_ok=True)
     (folder / 'check_report.json').write_text(json.dumps(report, indent=2, ensure_ascii=False))
     sys.exit(1 if failed else 0)
 
