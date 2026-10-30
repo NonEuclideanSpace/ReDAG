@@ -20,7 +20,15 @@ P=("$PY" scripts/launch/pipeline.py)
 command=${1:-start}
 [ $# -gt 0 ] && shift
 
+sync_loop() {  # SYNC_PEER=root@host:port in local.env: keep exchanging outputs with the other machine (HANDOFF.md section 4)
+    if [ -n "${SYNC_PEER:-}" ] && ! pgrep -f "pipeline.py sync" >/dev/null; then
+        setsid nohup "${P[@]}" sync --peer "$SYNC_PEER" --loop "${SYNC_EVERY:-120}" >> "$LOGS/sync.out" 2>&1 < /dev/null &
+        echo "sync with $SYNC_PEER started (log: $LOGS/sync.out)"
+    fi
+}
+
 start() {
+    sync_loop
     if "${P[@]}" is-running; then
         echo "scheduler already running"
         "${P[@]}" status --brief

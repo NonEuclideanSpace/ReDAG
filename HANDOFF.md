@@ -104,11 +104,10 @@ bash scripts/launch/go.sh status     # 看进度：每张卡在跑什么、进�
    # 第二台 local.env
    LOCAL_JOBS='^(sft_editor|exp1_s\d+|exp3_(zero_shot|sft)_s\d+)$'
    ```
-3. 在主机上配置到第二台的免密 ssh，然后启动同步。同步是双向的，新文件覆盖旧文件，且先传输出、后传完成标记，所以不会出现"标记到了文件还没到"：
+3. 在主机上配置到第二台的免密 ssh，然后在主机的 `local.env` 里写上 `SYNC_PEER`。此后每次执行 `go.sh` 都会自动启动同步（重启后也是）。同步是双向的，新文件覆盖旧文件，且先传输出、后传完成标记，所以不会出现"标记到了文件还没到"：
    ```bash
    ssh-keygen -t ed25519 -N '' -f ~/.ssh/redag_sync    # 把 ~/.ssh/redag_sync.pub 追加到第二台的 ~/.ssh/authorized_keys
-   setsid nohup python scripts/launch/pipeline.py sync --peer root@connect.<地区>.seetacloud.com:<端口> --loop 120 \
-       >> runs/logs/sync.out 2>&1 &
+   echo "SYNC_PEER=root@connect.<地区>.seetacloud.com:<端口>" >> local.env    # 第二台的 SSH 登录指令里的地址和端口
    ```
 4. 两台机器都执行 `go.sh`。对方跑完的任务一同步过来，本机的下游任务就会自动开始。
 
