@@ -22,6 +22,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -958,7 +959,7 @@ def cmd_bundle(args, s):
 
 SYNC_INCLUDE = ('data/final/***', 'data/processed/graphs/***', 'data/processed/canvases/***',
                 'runs/sft/***', 'runs/rl/***', 'runs/eval/***')
-SYNC_EXCLUDE = ('resume/', 'resume.tmp/', 'resume.old/', '*.tmp', '*.incomplete', '__pycache__/')
+SYNC_EXCLUDE = ('resume/', 'resume.tmp/', 'resume.old/', '*.tmp', '*.incomplete', '__pycache__/', '.rsync-partial/')
 
 
 def rsync(src, dst, ssh, filters, dry=False):
@@ -966,11 +967,18 @@ def rsync(src, dst, ssh, filters, dry=False):
     # its writer appended to within the second after the other direction copied it looked equally old but different
     # in size, so the stale copy replaced it; a writer that keeps the file open (SFT/RL metrics) then wrote into the
     # replaced inode and its later lines were lost (editor SFT metrics stopped at step 7159 of 8796).
-    cmd = ['rsync', '-a', '--update', '--modify-window=-1', '--partial', '--timeout=120', '-e', ssh]
+    cmd = ['rsync', '-a', '--update', '--modify-window=-1', '--partial-dir=.rsync-partial', '--timeout=120', '-e', ssh]
     cmd += [f'--exclude={x}' for x in SYNC_EXCLUDE] + filters + [src, dst]
     if dry:
         cmd.insert(1, '-n')
     return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def newer_files(src, dst, ssh, filters):
+    result = rsync(src, dst, ssh, filters + ['--out-format=%n'], dry=True)
+    if result.returncode not in (0, 24):
+        return None, result
+    return [name for name in result.stdout.splitlines() if name and not name.endswith('/')], result
 
 
 def cmd_sync(args, s):
@@ -989,13 +997,26 @@ def cmd_sync(args, s):
     outputs = [*dirs, '--exclude=runs/logs/**', '--exclude=runs/rl/**/stage_checkpoints.json',
                *[f'--include={p}' for p in SYNC_INCLUDE], '--exclude=*']
     finals = [*dirs, *markers, '--include=runs/rl/**/stage_checkpoints.json', '--include=runs/state/release/*', '--exclude=*']
+    failed = lambda label, kind, result: print(f'{time.strftime("%T")} {label} {kind} failed ({result.returncode}): {result.stderr.strip()[-300:]}', flush=True)
     while True:
         started = time.time()
         for label, src, dst in (('pull', remote, local), ('push', local, remote)):
-            for kind, filters in (('outputs', outputs), ('markers', finals)):
-                result = rsync(src, dst, ssh, filters, args.dry_run)
-                if result.returncode not in (0, 24):  # 24: files vanished during transfer (normal while jobs write)
-                    print(f'{time.strftime("%T")} {label} {kind} failed ({result.returncode}): {result.stderr.strip()[-300:]}', flush=True)
+            names, result = newer_files(src, dst, ssh, finals)
+            if names is None:
+                failed(label, 'marker list', result)
+            result = rsync(src, dst, ssh, outputs, args.dry_run)
+            if result.returncode not in (0, 24):
+                failed(label, 'outputs', result)
+                continue
+            if names:
+                with tempfile.NamedTemporaryFile('w', suffix='.list', delete=False) as listing:
+                    listing.write('\n'.join(names) + '\n')
+                try:
+                    result = rsync(src, dst, ssh, finals + [f'--files-from={listing.name}'], args.dry_run)
+                finally:
+                    os.unlink(listing.name)
+                if result.returncode not in (0, 24):
+                    failed(label, 'markers', result)
         print(f'{time.strftime("%T")} sync with {args.peer} done in {time.time() - started:.0f}s', flush=True)
         if not args.loop:
             return 0
