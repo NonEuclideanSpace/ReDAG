@@ -53,7 +53,13 @@ def test_unreachable_claims_host_falls_back_after_a_while(tmp_path):
     assert c.claim('rs_part1') and c.owner('rs_part0') is None   # still unreachable after the window: run anyway
 
 
+def clean_env(monkeypatch):
+    for name in ('CLAIMS_HOST', 'LOCAL_JOBS', 'EXTERNAL_JOBS', 'SHARED_JOBS', 'NOT_BEFORE', 'HOLD', 'SYNC_PEER'):
+        monkeypatch.delenv(name, raising=False)  # a shell that sourced env.sh / local.env must not leak into the test
+
+
 def test_shared_jobs_and_not_before_wiring(tmp_path, monkeypatch):
+    clean_env(monkeypatch)
     monkeypatch.setenv('RUNS', str(tmp_path / 'runs'))
     monkeypatch.setenv('EXTERNAL_JOBS', '^(sft_editor|annotate_shard[0-7])$')
     monkeypatch.setenv('SHARED_JOBS', '^(annotate_shard[0-7]|canvases_shard[0-3]|rs_part[0-3])$')
