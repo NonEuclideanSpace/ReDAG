@@ -114,12 +114,14 @@ bash scripts/launch/go.sh status     # 看进度：每张卡在跑什么、进�
 5. **谁先空谁来跑**（可选，推荐）：`SHARED_JOBS` 里的任务两台都能跑，哪台先空出卡就"认领"哪个，认领记录放在第二台上（第一台通过同一把 ssh 密钥去认领），所以同一个任务不会被跑两次。`SHARED_JOBS` 优先于 `EXTERNAL_JOBS`/`LOCAL_JOBS`。
    ```bash
    # 两台 local.env 写同一行；只在主机上加 CLAIMS_HOST（= 第二台的地址，和 SYNC_PEER 一样）
-   SHARED_JOBS='^(annotate_shard[0-7]|canvases_shard[0-3]|rs_part[0-3]|precompute_rl_states)$'
+   SHARED_JOBS='^(annotate_shard[0-7]|canvases_shard[0-3]|rs_part[0-9](_[0-9])?)$'
    CLAIMS_HOST=root@connect.<地区>.seetacloud.com:<端口>
    # 长的旁支任务等关键路径过去再开始，免得占住对方马上要用的卡（只影响先后，不影响结果）
    NOT_BEFORE='^(sft_planner|eval_planner_zero_shot)$>rs_merge'
    ```
    认领了任务的机器如果没了，用 `go.sh unclaim JOB` 交还，另一台会接手。第二台连不上超过 15 分钟（`CLAIMS_FALLBACK_MIN`）时，主机不再等认领记录，最坏是某个任务两台各跑一遍，浪费卡时但结果不受影响。
+
+   跑 RL 的机器如果只有一张卡，不要把长的旁支任务（`sft_planner`、`eval_planner_*`、`precompute_rl_states`）放进它的 `SHARED_JOBS`，而是写进它的 `EXTERNAL_JOBS`。单卡机器上调度器不会给"马上就绪"的任务预留 GPU：`rs_merge` 一完成，`sft_planner`（4 小时）就会在 `check_controller_sft` 那一分钟里抢走这张卡，控制器 SFT 和 RL 跟着推迟 4 小时。
 6. 某台机器暂时无事可做（在等对方的任务）时，调度器会一直等着，不会退出。
 
 ---
