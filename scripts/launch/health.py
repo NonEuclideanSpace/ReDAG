@@ -58,6 +58,59 @@ def annotation(root):
     return out
 
 
+def structure(graph):
+    """Shape of one condition DAG: depth (longest depends_on chain), share of local conditions, share of attribute /
+    relation conditions that depend on something, and whether it degenerates (flat although it has structured nodes,
+    or a single chain)."""
+    nodes = {n.get('node_id'): n for n in graph.get('nodes', []) if isinstance(n, dict)}
+    deps = {i: [d for d in (n.get('depends_on') or []) if d in nodes and d != i] for i, n in nodes.items()}
+    memo = {}
+
+    def depth(i, seen=frozenset()):
+        if i not in memo:
+            memo[i] = 0 if i in seen else 1 + max((depth(d, seen | {i}) for d in deps[i]), default=-1)
+        return memo[i]
+    n = len(nodes)
+    structured = [i for i, x in nodes.items() if x.get('node_type') in ('attribute', 'relation')]
+    longest = max((depth(i) for i in nodes), default=0)
+    return dict(n=n, depth=longest, local=sum(x.get('scope') == 'local' for x in nodes.values()) / max(n, 1),
+                linked=sum(1 for i in structured if deps[i]) / len(structured) if structured else None,
+                flat_structured=longest == 0 and bool(structured), chain=n >= 6 and longest >= 0.8 * n)
+
+
+def graph_structure(root):
+    """Degenerate graphs would erase what the DAG adds over a flat checklist (local verification, dependency-aware
+    repair): flag sources whose graphs are flat despite attributes/relations, mostly global, unlinked or chain-like.
+    Flat graphs of pure presence checklists (e.g. CoReBench multi-instance) are normal and not flagged."""
+    by_source = {}
+    for path in sorted((root / 'data' / 'processed' / 'graphs').glob('*.jsonl')):
+        for row in rows(path):
+            if row.get('annotation', {}).get('status') in ('ok', 'repaired') and isinstance(row.get('graph'), dict):
+                by_source.setdefault(row.get('source') or path.name.split('.')[0], []).append(structure(row['graph']))
+    out = []
+    for source, shapes in sorted(by_source.items()):
+        if len(shapes) < 30:
+            out.append(item(f'graphs/{source}', '1 data', WAIT, f'{len(shapes)} graphs'))
+            continue
+        mean = lambda key: statistics.fmean(s[key] for s in shapes if s[key] is not None) if any(s[key] is not None for s in shapes) else 1.0
+        share = lambda key: sum(1 for s in shapes if s[key]) / len(shapes)
+        depths = [s['depth'] for s in shapes]
+        problems = []
+        if share('flat_structured') > 0.15:
+            problems.append(f"{share('flat_structured'):.0%} have attributes/relations but no dependency at all")
+        if mean('local') < 0.3:
+            problems.append(f"only {mean('local'):.0%} of conditions are local")
+        if mean('linked') < 0.6:
+            problems.append(f"only {mean('linked'):.0%} of attributes/relations depend on an entity")
+        if share('chain') > 0.05:
+            problems.append(f"{share('chain'):.0%} are single chains")
+        out.append(item(f'graphs/{source}', '1 data', WARN if problems else OK,
+                        f"{len(shapes)} graphs, {statistics.fmean(s['n'] for s in shapes):.0f} conditions, depth {statistics.fmean(depths):.1f} "
+                        f"(max {max(depths)}, {sum(d == 0 for d in depths) / len(depths):.0%} flat), local {mean('local'):.0%}, "
+                        f"linked {mean('linked'):.0%}", '; '.join(problems)))
+    return out
+
+
 def data_sets(root):
     manifest = load(root / 'data' / 'final' / 'manifest.json')
     if not manifest:
@@ -165,7 +218,8 @@ def evaluations(runs):
 
 def report(root, runs):
     root, runs = Path(root), Path(runs)
-    checks = annotation(root) + data_sets(root) + sft(runs) + rejection_sampling(root, runs) + rl(runs) + evaluations(runs)
+    checks = (annotation(root) + graph_structure(root) + data_sets(root) + sft(runs) + rejection_sampling(root, runs) + rl(runs)
+              + evaluations(runs))
     return dict(updated=time.time(), checks=checks)
 
 

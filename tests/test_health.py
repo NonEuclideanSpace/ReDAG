@@ -60,3 +60,19 @@ def test_gates_hold_jobs_until_released(tmp_path, monkeypatch):
     assert by_name['exp3_zero_shot_s0'].ready()
     assert not by_name['exp3_ctrl_rl_s0'].ready()               # also needs after_rl and its checkpoint
     assert '--reuse_cases' in by_name['exp3_sft_s3'].cmd and 'exp1_s3' in by_name['exp3_sft_s3'].deps
+
+
+def test_graph_structure_flags_degenerate_sources(tmp_path):
+    def node(i, kind, deps=(), scope='local'):
+        return {'node_id': i, 'node_type': kind, 'depends_on': list(deps), 'scope': scope}
+    good = {'nodes': [node('e1', 'entity'), node('q1', 'attribute', ['e1']), node('q2', 'relation', ['e1', 'e2']), node('e2', 'entity'),
+                      node('q3', 'attribute', ['q2'])]}
+    unlinked = {'nodes': [node('e1', 'entity', scope='global'), node('q1', 'attribute', scope='global'), node('q2', 'relation', scope='global')]}
+    presence = {'nodes': [node('q1', 'entity'), node('q2', 'entity'), node('q3', 'prohibition', scope='global')]}  # flat by nature
+    write(tmp_path / 'data/processed/graphs/a.shard0of8.jsonl',
+          [{'source': 'a', 'annotation': {'status': 'ok'}, 'graph': good}] * 20 + [{'source': 'a', 'annotation': {'status': 'ok'}, 'graph': presence}] * 20)
+    write(tmp_path / 'data/processed/graphs/b.shard0of8.jsonl', [{'source': 'b', 'annotation': {'status': 'ok'}, 'graph': unlinked}] * 30)
+    checks = {c['key']: c for c in health.graph_structure(tmp_path)}
+    assert checks['graphs/a']['status'] == 'ok' and 'depth 1.0' in checks['graphs/a']['value']
+    assert checks['graphs/b']['status'] == 'warn' and 'no dependency' in checks['graphs/b']['detail']
+    assert health.structure(good)['depth'] == 2 and not health.structure(presence)['flat_structured']
