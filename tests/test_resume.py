@@ -11,7 +11,7 @@ from redag.graph.schema import ConditionDAG, ConditionNode, ControllerAction
 from redag.harness.environment import ReDAGHarness
 from redag.learn import checkpoint
 from redag.learn import rl_trainer
-from redag.learn.sft_trainer import train_sft
+from redag.learn.sft_trainer import piece_bounds, train_sft
 from redag.verify.verifier import TwoStageVerifier
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -261,3 +261,14 @@ def test_experiment3_sft_stage_reuses_experiment1_sessions(tmp_path, monkeypatch
     other = [a if a != 50 else 60 for a in common]
     assert eval_main(monkeypatch, tmp_path, other + exp3[:-4] + ['--output', tmp_path / 'eval' / 'exp3_other.s0.json',
                                                                  '--reuse_cases', tmp_path / 'eval' / 'exp1.s0.cases.jsonl']) == 9
+
+
+def test_rejection_sampling_pieces_cover_every_state_once_with_balanced_cost():
+    costs = [1.0] * 100 + [2.4] * 67
+    for pieces in (1, 2, 3, 6, 200):
+        bounds = [piece_bounds(costs, p, pieces) for p in range(pieces)]
+        assert bounds[0][0] == 0 and bounds[-1][1] == len(costs)
+        assert all(a[1] == b[0] for a, b in zip(bounds, bounds[1:])) and all(start <= stop for start, stop in bounds)
+    shares = [sum(costs[slice(*piece_bounds(costs, p, 6))]) for p in range(6)]
+    assert max(shares) - min(shares) <= 2 * max(costs)
+    assert piece_bounds([1.0] * 6, 1, 3) == (2, 4)
