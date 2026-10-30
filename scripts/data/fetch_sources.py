@@ -2,7 +2,9 @@
 
   MagicBrush      osunlp/MagicBrush (parquet; train ~23.9 GiB, dev ~1.4 GiB, CC-BY-4.0)
   T2I-CoReBench   lioooox/T2I-CoReBench (12 x 90 prompts with yes/no checklists, Apache-2.0)
-  LGBench         not publicly released -> put the file under data/raw/lgbench/ yourself
+  LGBench         TruemanV5/LGBench (t2i_1000.json, i2i_1000.json, 1000 I2I source images ~1.35 GiB)
+  LongBench-T2I   YCZhou/LongBench-T2I (instruction.jsonl)
+  Files that already exist with the expected size are kept (e.g. copies uploaded by hand).
 
 Examples
   python scripts/data/fetch_sources.py --what corebench
@@ -27,7 +29,27 @@ SOURCES = {
     'corebench': ('lioooox/T2I-CoReBench', 'splits'),
     # 4 images per CoReBench prompt from one T2I model; used as zero-shot initial canvases (no GPU rendering)
     'corebench_images': ('lioooox/T2I-CoReBench-Images', ''),
+    'lgbench': ('TruemanV5/LGBench', ''),
+    'longbench': ('YCZhou/LongBench-T2I', ''),
 }
+TARGETS = {'lgbench': RAW / 'benchmarks' / 'lgbench', 'longbench': RAW / 'benchmarks' / 'longbench_t2i'}
+KEEP = {'lgbench': lambda f: f.endswith('_1000.json') or f.startswith('i2i_source_images/'),
+        'longbench': lambda f: f == 'instruction.jsonl'}
+
+
+def link_source_folders(target):
+    """i2i_1000.json names its images under a dated folder (e.g. i2i_source_images_20251104_153239/...); the repository
+    stores them under i2i_source_images/, so the dated name becomes a relative symlink."""
+    index = target / 'i2i_1000.json'
+    if not index.exists():
+        return
+    records = json.loads(index.read_text())
+    records = records if isinstance(records, list) else list(records.values())
+    for folder in {str(r.get('source_image_path', '')).split('/')[0] for r in records if isinstance(r, dict)} - {'', 'i2i_source_images'}:
+        link = target / folder
+        if not link.exists() and not link.is_symlink():
+            link.symlink_to('i2i_source_images')
+            log(f'linked {folder} -> i2i_source_images')
 
 
 def extract_archive(path, target):
@@ -91,12 +113,14 @@ def main():
     report = {}
     for name in args.what:
         repo_id, folder = SOURCES[name]
-        target = RAW / name
+        target = TARGETS.get(name, RAW / name)
         target.mkdir(parents=True, exist_ok=True)
         if name == 'corebench_images':
             files = [(f'{model}.tar.gz', None) for model in args.archives]
         else:
             files = listing(repo_id, folder)
+        if name in KEEP:
+            files = [f for f in files if KEEP[name](f[0])]
         if name == 'magicbrush':
             picked = []
             for split in args.splits:
@@ -117,10 +141,12 @@ def main():
             for filename, status in results.items():
                 if status in ('ok', 'cached'):
                     extract_archive(target / filename, target / filename.replace('.tar.gz', ''))
+        if name == 'lgbench':
+            link_source_folders(target)
     failed = [f for r in report.values() for f, s in r['files'].items() if s == 'failed']
     log('done' if not failed else f'{len(failed)} files failed; rerun the same command to resume')
-    if not (RAW / 'benchmarks' / 'lgbench' / 't2i_1000.json').exists():
-        log('note: LGBench (t2i_1000.json, i2i_1000.json, i2i source images) is expected under data/raw/benchmarks/lgbench/')
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':

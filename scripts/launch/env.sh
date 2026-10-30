@@ -3,6 +3,9 @@
 set -o pipefail
 
 export REDAG_ROOT=${REDAG_ROOT:-/root/autodl-tmp/ReDAG}
+# machine-local settings that should survive restarts and stay out of git (NOTIFY_URL, AUTO_SHUTDOWN, knobs, ...)
+# shellcheck disable=SC1091
+[ -f "$REDAG_ROOT/local.env" ] && set -a && . "$REDAG_ROOT/local.env" && set +a
 export MODELS=${MODELS:-/root/autodl-tmp/models}
 export HF_HOME=${HF_HOME:-/root/autodl-tmp/hf_cache}
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1   # weights are local; never call the hub mid-run
@@ -35,14 +38,19 @@ RUNTIME="--controller_model $CONTROLLER --editor_model $EDITOR --verifier_model 
 --detector_model $DETECTOR --sam_model $SAM --planner_model $PLANNER"
 export RUNTIME
 
-# run_job NAME COMMAND...  -> log to runs/logs/NAME.log, skip when runs/logs/NAME.done exists
+# run_job NAME COMMAND...  -> log to runs/logs/NAME.log, skip when runs/logs/NAME.done exists.  The job lock is the
+# one the scheduler (pipeline.py) uses, so the same job never runs twice at once.
 run_job() {
     local name=$1; shift
     if [ -f "$LOGS/$name.done" ]; then echo "[skip] $name (delete $LOGS/$name.done to rerun)"; return 0; fi
     echo "[start] $name  $(date '+%F %T')"
     local t0=$SECONDS
-    ( cd "$REDAG_ROOT" && "$@" ) > "$LOGS/$name.log" 2>&1
+    mkdir -p "$RUNS/state/jobs"
+    ( flock -n 9 || exit 75   # the log is opened only once the lock is held, so a busy call cannot truncate it
+      exec > "$LOGS/$name.log" 2>&1
+      cd "$REDAG_ROOT" && "$@" ) 9>"$RUNS/state/jobs/$name.lock"
     local status=$?
+    if [ $status -eq 75 ]; then echo "[busy] $name is already running in another process (scheduler?)"; return 75; fi
     local spent=$(( SECONDS - t0 ))
     printf '{"job": "%s", "seconds": %d, "status": %d, "ended": "%s"}\n' "$name" "$spent" "$status" "$(date '+%F %T')" >> "$LOGS/timings.jsonl"
     if [ $status -ne 0 ]; then echo "[FAIL] $name after ${spent}s, see $LOGS/$name.log"; tail -n 20 "$LOGS/$name.log"; return $status; fi

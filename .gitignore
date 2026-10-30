@@ -10,3 +10,4 @@ dist/
 .env
 runs/
 checkpoints/
+local.env
