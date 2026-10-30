@@ -59,6 +59,7 @@ bash scripts/launch/go.sh status     # 看进度：每张卡在跑什么、进�
 | `go.sh drain` | 正在跑的任务做完再停，不再启动新任务。适合计划关机前用 |
 | `go.sh retry` | 启动，并重试"在当前代码下失败过"的任务。修好代码后不需要这条：代码一变，失败的任务会自动重试 |
 | `go.sh reload` | 只重启调度器（`git pull` 之后用），正在跑的任务不受影响，会被新调度器接管 |
+| `go.sh restart JOB…` | 让正在跑的任务换上新代码：从检查点续跑，不算一次失败 |
 | `go.sh preflight` | 手动重跑 GPU 预检（约 2 分钟），改动较大的代码之后用 |
 | `go.sh plan --gpus 1 2 4 8` | 估算换成不同卡数需要多久 |
 | `go.sh reset JOB [--dependents]` | 让某个任务（及其下游）重新跑。输出会保留，可续跑的任务会跳过已完成的部分 |
@@ -110,6 +111,16 @@ bash scripts/launch/go.sh status     # 看进度：每张卡在跑什么、进�
    echo "SYNC_PEER=root@connect.<地区>.seetacloud.com:<端口>" >> local.env    # 第二台的 SSH 登录指令里的地址和端口
    ```
 4. 两台机器都执行 `go.sh`。对方跑完的任务一同步过来，本机的下游任务就会自动开始。
+5. **谁先空谁来跑**（可选，推荐）：`SHARED_JOBS` 里的任务两台都能跑，哪台先空出卡就"认领"哪个，认领记录放在第二台上（第一台通过同一把 ssh 密钥去认领），所以同一个任务不会被跑两次。`SHARED_JOBS` 优先于 `EXTERNAL_JOBS`/`LOCAL_JOBS`。
+   ```bash
+   # 两台 local.env 写同一行；只在主机上加 CLAIMS_HOST（= 第二台的地址，和 SYNC_PEER 一样）
+   SHARED_JOBS='^(annotate_shard[0-7]|canvases_shard[0-3]|rs_part[0-3]|precompute_rl_states)$'
+   CLAIMS_HOST=root@connect.<地区>.seetacloud.com:<端口>
+   # 长的旁支任务等关键路径过去再开始，免得占住对方马上要用的卡（只影响先后，不影响结果）
+   NOT_BEFORE='^(sft_planner|eval_planner_zero_shot)$>rs_merge'
+   ```
+   认领了任务的机器如果没了，用 `go.sh unclaim JOB` 交还，另一台会接手。第二台连不上超过 15 分钟（`CLAIMS_FALLBACK_MIN`）时，主机不再等认领记录，最坏是某个任务两台各跑一遍，浪费卡时但结果不受影响。
+6. 某台机器暂时无事可做（在等对方的任务）时，调度器会一直等着，不会退出。
 
 ---
 
@@ -119,7 +130,7 @@ bash scripts/launch/go.sh status     # 看进度：每张卡在跑什么、进�
 - **不要同时开两个调度器**，也不要手动跑旧的 `0x_*.sh`。它们现在只是调度器的包装，会被拒绝。
 - 不要删 `runs/state/`、`runs/logs/*.done`。要重跑请用 `go.sh reset`。
 - 停任务请用 `go.sh stop` 或 `drain`，不要 `kill -9` 作业进程。
-- 本机专用的设置写在仓库根目录的 `local.env` 里，它不进 git。可写的有：`NOTIFY_URL`、`AUTO_SHUTDOWN`、`FETCH_WORKERS`、`WORKERS`、`CPU_SLOTS`、`EXTERNAL_JOBS`。
+- 本机专用的设置写在仓库根目录的 `local.env` 里，它不进 git。可写的有：`NOTIFY_URL`、`AUTO_SHUTDOWN`、`FETCH_WORKERS`、`WORKERS`、`CPU_SLOTS`、`ANNOTATE_BATCH`、`HOLD`、`EXTERNAL_JOBS`/`LOCAL_JOBS`、`SHARED_JOBS`、`CLAIMS_HOST`、`NOT_BEFORE`、`SYNC_PEER`。
 
 ---
 

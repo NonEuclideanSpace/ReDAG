@@ -19,6 +19,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -311,6 +312,83 @@ def gate_open(runs, gate):
     return (Path(runs) / 'state' / 'release' / gate).exists()
 
 
+class Claims:
+    """SHARED_JOBS: jobs that any of several machines may run; the first machine to claim one runs it.
+
+    A claim is a file runs/state/claims/<job> holding the owner's host name, created atomically (O_EXCL / noclobber)
+    on one machine: CLAIMS_HOST (root@host:port, reached by ssh with the sync key), or this machine when unset.  Each
+    machine therefore needs the claims host reachable; the helper that cannot ssh anywhere holds the claims.  If the
+    claims host stays unreachable for CLAIMS_FALLBACK_MIN minutes, this machine stops honouring remote claims (a job
+    may then run twice, which wastes GPU time but is safe: both copies write the same complete outputs)."""
+
+    def __init__(self, runs, host='', key=None, me=None, ttl=45.0, fallback_minutes=15.0, log=print):
+        rel = Path(runs).resolve().relative_to(ROOT) if Path(runs).resolve().is_relative_to(ROOT) else Path('runs')
+        self.local = Path(runs) / 'state' / 'claims'
+        self.remote = shlex.quote(f'{ROOT}/{rel}/state/claims')
+        self.host, _, port = host.partition(':')
+        self.port = port or '22'
+        self.key = key or os.path.expanduser('~/.ssh/redag_sync')
+        self.me = me or socket.gethostname()
+        self.ttl, self.fallback, self.log = ttl, fallback_minutes * 60, log
+        self.cache, self.cached_at, self.unreachable_since = {}, 0.0, None
+
+    def ssh(self, command):
+        try:
+            out = subprocess.run(['ssh', '-p', self.port, '-i', self.key, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
+                                  '-o', 'ConnectTimeout=10', self.host, command], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            out = None
+        if out is None or out.returncode not in (0, 1):
+            if self.unreachable_since is None:
+                self.unreachable_since = time.time()
+                self.log(f'claims host {self.host} unreachable')
+            return None
+        if self.unreachable_since is not None:
+            self.log(f'claims host {self.host} reachable again')
+        self.unreachable_since = None
+        return out.stdout
+
+    def degraded(self):
+        return self.unreachable_since is not None and time.time() - self.unreachable_since > self.fallback
+
+    def owners(self):
+        if not self.host:
+            return {p.name: p.read_text(encoding='utf-8').strip() for p in self.local.glob('*') if p.is_file()}
+        if time.time() - self.cached_at > self.ttl:
+            out = self.ssh(f'mkdir -p {self.remote} && cd {self.remote} && for f in *; do [ -f "$f" ] && echo "$f $(cat "$f")"; done; true')
+            if out is not None:
+                self.cache = dict(line.split(' ', 1) for line in out.splitlines() if ' ' in line)
+            self.cached_at = time.time()
+        return self.cache
+
+    def owner(self, name):
+        return None if self.degraded() else self.owners().get(name)
+
+    def claim(self, name):
+        """True if this machine owns the job (claimed now or earlier)."""
+        if not self.host:
+            self.local.mkdir(parents=True, exist_ok=True)
+            try:
+                fd = os.open(self.local / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                os.write(fd, self.me.encode())
+                os.close(fd)
+            except FileExistsError:
+                pass
+            return (self.local / name).read_text(encoding='utf-8').strip() == self.me
+        out = self.ssh(f'mkdir -p {self.remote} && (set -o noclobber; printf %s {shlex.quote(self.me)} > {self.remote}/{name}) 2>/dev/null; '
+                       f'cat {self.remote}/{name}')
+        if out is None:
+            return self.degraded()
+        self.cache[name] = out.strip()
+        return out.strip() == self.me
+
+    def release(self, name):
+        if not self.host:
+            (self.local / name).unlink(missing_ok=True)
+            return True
+        return self.ssh(f'rm -f {self.remote}/{name}') is not None
+
+
 def stage_ready(path, stage):
     mapping = read_json(path, {})
     entry = mapping.get(stage) if isinstance(mapping, dict) else None
@@ -466,11 +544,33 @@ def make_scheduler(args, s, quiet=False, gpus=None):
     # Several machines, one pipeline (HANDOFF.md section 4): the same regex is EXTERNAL_JOBS on the main machine and
     # LOCAL_JOBS on a helper.  External jobs are never started here; their dependents wait until `pipeline.py sync`
     # brings their outputs and .done marker.  The CPU data phase and the preflight always run on every machine.
-    external, local_only = env('EXTERNAL_JOBS', ''), env('LOCAL_JOBS', '')
+    # SHARED_JOBS run on whichever machine claims them first (class Claims); they ignore EXTERNAL_JOBS / LOCAL_JOBS.
+    external, local_only, shared = env('EXTERNAL_JOBS', ''), env('LOCAL_JOBS', ''), env('SHARED_JOBS', '')
+    claims = Claims(s['RUNS'], env('CLAIMS_HOST', ''), fallback_minutes=float(env('CLAIMS_FALLBACK_MIN', 15))) if shared else None
+    is_shared = lambda name: bool(shared) and name not in cpu_phase and name not in ('preflight', 'download_models') and bool(re.search(shared, name))
     for job in jobs:
-        shared = job.name not in cpu_phase and job.name not in ('preflight', 'download_models')
-        if shared and ((external and re.search(external, job.name)) or (local_only and not re.search(local_only, job.name))):
+        per_machine = job.name in cpu_phase or job.name in ('preflight', 'download_models')
+        if is_shared(job.name):
+            def ready(job=job, previous=job.ready, waiting=job.waiting_for):
+                owner = claims.owner(job.name)
+                if owner not in (None, claims.me):
+                    job.waiting_for = f'claimed by {owner} (go.sh unclaim {job.name} hands it over)'
+                    return False
+                job.waiting_for = waiting
+                return previous is None or previous()
+            job.ready = ready
+        elif not per_machine and ((external and re.search(external, job.name)) or (local_only and not re.search(local_only, job.name))):
             job.ready, job.waiting_for = (lambda: False), 'runs on another machine'
+    # NOT_BEFORE='<regex>><job> ...': scheduling order only, e.g. keep long side jobs from taking a GPU that the critical
+    # path needs soon on another machine (the scheduler cannot see the other machine's ETAs)
+    for rule in env('NOT_BEFORE', '').replace(';', ' ').split():
+        pattern, _, after = rule.rpartition('>')
+        for job in jobs:
+            if pattern and after and re.search(pattern, job.name) and job.name != after:
+                def ready(previous=job.ready, marker=Path(s['RUNS']) / 'logs' / f'{after}.done'):
+                    return marker.exists() and (previous is None or previous())
+                job.ready = ready
+                job.waiting_for = f'{after} (NOT_BEFORE)' + (f'; then {job.waiting_for}' if job.waiting_for else '')
     orch.MILESTONES.update(MILESTONES)
     import health
     notifier = Notifier(os.environ.get('NOTIFY_URL'), log=print)
@@ -478,7 +578,8 @@ def make_scheduler(args, s, quiet=False, gpus=None):
                           notifier=notifier, gpu_free_mib=float(env('GPU_FREE_MIB', 2000)),
                           tick=lambda: health.refresh(ROOT, s['RUNS'], notifier), tick_every=float(env('HEALTH_EVERY_MIN', 10)) * 60,
                           code_version=code_version(), retry_failed=getattr(args, 'retry_failed', False),
-                          max_hours=float(env('MAX_HOURS', 0)) or None, log=None if not quiet else (lambda text: None))
+                          max_hours=float(env('MAX_HOURS', 0)) or None, log=None if not quiet else (lambda text: None),
+                          claim=(lambda name: claims.claim(name) if is_shared(name) else True) if claims else None)
     return scheduler, jobs, cpu_phase, info
 
 
@@ -662,6 +763,14 @@ def cmd_release(args, s):
     folder.mkdir(parents=True, exist_ok=True)
     (folder / args.gate).write_text(time.strftime('%F %T') + '\n')
     print(f'released {args.gate}: held jobs start on this machine (and on a synced peer within a few minutes)')
+    return 0
+
+
+def cmd_unclaim(args, s):
+    """Hand a shared job back (e.g. the machine that claimed it is gone): the next free machine claims it again."""
+    claims = Claims(s['RUNS'], env('CLAIMS_HOST', ''))
+    for name in args.jobs:
+        print(f'{name}: was claimed by {claims.owners().get(name)}; ' + ('released' if claims.release(name) else 'claims host unreachable'))
     return 0
 
 
@@ -981,6 +1090,8 @@ def main(argv=None):
     logs.add_argument('-f', '--follow', action='store_true')
     restart = sub.add_parser('restart', help='restart running jobs with the current code (resume, not counted as a failure)')
     restart.add_argument('jobs', nargs='+')
+    unclaim = sub.add_parser('unclaim', help='release the claim on shared jobs (SHARED_JOBS) so another machine can take them')
+    unclaim.add_argument('jobs', nargs='+')
     reset = sub.add_parser('reset', help='forget that jobs finished (outputs are kept)')
     reset.add_argument('jobs', nargs='+')
     reset.add_argument('--dependents', action='store_true')
@@ -1023,7 +1134,7 @@ def main(argv=None):
         return 0 if ok else 1
     return {'run': cmd_run, 'status': cmd_status, 'stop': cmd_stop, 'plan': cmd_plan, 'list': cmd_list,
             'logs': cmd_logs, 'reset': cmd_reset, 'sync': cmd_sync, 'health': cmd_health, 'release': cmd_release,
-            'restart': cmd_restart}[args.command](args, s)
+            'restart': cmd_restart, 'unclaim': cmd_unclaim}[args.command](args, s)
 
 
 if __name__ == '__main__':
