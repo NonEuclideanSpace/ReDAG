@@ -26,11 +26,19 @@ QUOTA = {30: {'corebench': 0.40, 'lgbench': 0.40, 'longbench': 0.10, 'magicbrush
          10: {'corebench': 0.25, 'lgbench': 0.25, 'longbench': 0.10, 'magicbrush': 0.40}}
 
 
-def load_graphs(folder, statuses):
+def load_graphs(folder, statuses, sessions_dir=None):
+    """Annotated sessions; canvas fields come from the current session files, because a session can be annotated
+    before its initial canvas is attached (the checklist benchmarks are annotated while CoReBench canvases download)."""
+    current = {}
+    for path in sorted(Path(sessions_dir or PROC / 'sessions').glob('*.jsonl')):
+        for row in iter_jsonl(path):
+            current[row['id']] = row
     sessions = {}
     for path in sorted(Path(folder).glob('*.jsonl')):
         for row in iter_jsonl(path):
             if row.get('annotation', {}).get('status') in statuses:
+                fresh = current.get(row['id'], {})
+                row.update({key: fresh[key] for key in ('image', 'canvas_origin', 'canvas_prompt') if key in fresh})
                 sessions[row['id']] = row
     return sessions
 

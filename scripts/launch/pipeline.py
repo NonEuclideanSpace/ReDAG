@@ -120,8 +120,12 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
         add(f'prep_magicbrush_{split}', [py, f'{D}/prep_magicbrush.py', '--splits', split, '--size', 512, '--workers', s['WORKERS']],
             deps=(f'fetch_magicbrush_{split}',), hours=2.0 if split == 'train' else 0.3, group=g)
     canvas = shlex.quote(s['CANVAS_DIR'])
+    # sessions without canvases first (enough for graph annotation, which only reads text), then again with the
+    # CoReBench canvases once that archive is in; ids are identical and build_sets takes canvases from the latter
+    add('prep_checklists_text', [py, f'{D}/prep_checklists.py', '--what', 'corebench', 'lgbench', 'longbench'],
+        deps=('fetch_corebench', 'fetch_benchmarks'), hours=0.05, group=g)
     add('prep_checklists', f'{shlex.quote(py)} {D}/prep_checklists.py --what corebench lgbench longbench '
-        f'$([ -d {canvas} ] && echo --canvas_dir {canvas})', deps=('fetch_corebench', 'fetch_corebench_images', 'fetch_benchmarks'),
+        f'$([ -d {canvas} ] && echo --canvas_dir {canvas})', deps=('prep_checklists_text', 'fetch_corebench_images'),
         hours=0.1, group=g)
     add('plan_annotation', [py, f'{D}/plan_annotation.py'],
         deps=tuple(f'prep_magicbrush_{x}' for x in s['MB_SPLITS']) + ('prep_checklists',), group=g)
@@ -130,7 +134,7 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
     sessions = 'data/processed/sessions'
     checklists = f'$(ls {sessions}/corebench.jsonl {sessions}/lgbench.jsonl {sessions}/longbench.jsonl 2>/dev/null)'
     add('plan_annotation_checklists', f'{shlex.quote(py)} {D}/plan_annotation.py --sessions {checklists} '
-        f'--output {sessions}/annotate_ids_checklists.txt', deps=('prep_checklists',), group=g)
+        f'--output {sessions}/annotate_ids_checklists.txt', deps=('prep_checklists_text',), group=g)
     cpu_phase = [j.name for j in jobs]
 
     # ---- GPU preflight (re-run whenever the code or the GPUs change)
@@ -152,7 +156,7 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
             gpus=1, deps=('plan_annotation', f'annotate_checklists_shard{k}'), hours=2.4 / shards, group=g, family='annotate')
     add('build_sets', [py, f'{D}/build_sets.py', '--per_tier', s['PER_TIER'], '--n_rs_states', s['N_RS_STATES'],
                        '--n_rl_train', s['N_RL_TRAIN'], '--n_rl_dev', s['N_RL_DEV']],
-        deps=tuple(f'annotate_shard{k}' for k in range(shards)), group=g)
+        deps=tuple(f'annotate_shard{k}' for k in range(shards)) + ('prep_checklists',), group=g)
     canvases = tuple(f'canvases_shard{k}' for k in range(s['CANVAS_SHARDS']))
     for k, name in enumerate(canvases):
         add(name, [py, f'{D}/render_canvases.py', '--model', s['EDITOR'], '--device', 'cuda:0', '--shard', k,
