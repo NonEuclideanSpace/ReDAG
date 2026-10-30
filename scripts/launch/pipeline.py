@@ -422,12 +422,14 @@ def make_scheduler(args, s, quiet=False, gpus=None):
         for job in jobs:
             job.soft = tuple((d, f) for d, f in job.soft if d in keep)
         cpu_phase = [n for n in cpu_phase if n in keep]
-    external = env('EXTERNAL_JOBS', '')
-    if external:  # run on another machine: dependents wait until its outputs are copied here and its .done marker exists
-        pattern = re.compile(external)
-        for job in jobs:
-            if pattern.search(job.name):
-                job.ready, job.waiting_for = (lambda: False), 'runs on another machine (EXTERNAL_JOBS)'
+    # Several machines, one pipeline (HANDOFF.md section 4): the same regex is EXTERNAL_JOBS on the main machine and
+    # LOCAL_JOBS on a helper.  External jobs are never started here; their dependents wait until `pipeline.py sync`
+    # brings their outputs and .done marker.  The CPU data phase and the preflight always run on every machine.
+    external, local_only = env('EXTERNAL_JOBS', ''), env('LOCAL_JOBS', '')
+    for job in jobs:
+        shared = job.name not in cpu_phase and job.name not in ('preflight', 'download_models')
+        if shared and ((external and re.search(external, job.name)) or (local_only and not re.search(local_only, job.name))):
+            job.ready, job.waiting_for = (lambda: False), 'runs on another machine'
     orch.MILESTONES.update(MILESTONES)
     scheduler = Scheduler(jobs, s['RUNS'], ROOT, gpus=gpus, cpu_slots=int(env('CPU_SLOTS', 0)) or (3 if info else 1),
                           notifier=Notifier(os.environ.get('NOTIFY_URL'), log=print), gpu_free_mib=float(env('GPU_FREE_MIB', 2000)),

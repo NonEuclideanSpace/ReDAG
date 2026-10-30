@@ -1,0 +1,27 @@
+# Package versions of the environment the pipeline was validated on (RTX PRO 6000 Blackwell 96 GB, 2026-10-30).
+# Base image (AutoDL): Ubuntu 22.04, Python 3.12.3, torch 2.12.1+cu130, torchvision 0.27.1+cu130, triton 3.7.1,
+# CUDA 13.0 (needs an NVIDIA driver >= 580; validated with 590.44.01).  torch/torchvision/triton come with the image
+# and are deliberately not listed here.  bootstrap.sh installs this file:
+#   pip install -r scripts/launch/requirements.lock.txt -i https://mirrors.aliyun.com/pypi/simple
+transformers==5.22.0
+diffusers==0.38.0
+peft==0.20.0
+accelerate==1.15.0
+bitsandbytes==0.50.2
+safetensors==0.9.0rc1
+tokenizers==0.23.3
+huggingface_hub==1.33.0
+sentencepiece==0.2.2
+protobuf==7.35.1
+numpy==2.4.6
+pillow==12.2.0
+pyarrow==26.0.0
+scipy==1.18.1
+regex==2026.9.29
+psutil==7.2.2
+pytest==9.2.0
+# Gated-DeltaNet kernels for Qwen3.5 / Qwen3.8 (several times faster than the PyTorch fallback); the GPU preflight
+# removes them again if they fail on the machine's GPU
+flash-linear-attention==0.6.0
+fla-core==0.6.0
+einops==0.8.2
