@@ -60,6 +60,20 @@ def test_checklist_answer_with_the_models_own_nodes_is_salvaged():
     assert any('dropped' in w for w in warnings) and any('renamed' in w for w in warnings)
 
 
+def test_decompose_answer_with_its_own_ids_is_renamed_not_dropped():
+    session = {'id': 'lb:1', 'kind': 't2i', 'prompt': 'A dog plays with a red ball on grass under a blue sky.'}
+    value = {'nodes': [node('c1', 'entity', 'Is there a dog?', 'dog'), node('c2', 'attribute', 'Is the dog brown?', 'dog', ['c1']),
+                       node('r1', 'relation', 'Is the dog playing with the ball?', 'dog', ['c1', 'b1']),
+                       node('b1', 'entity', 'Is there a ball?', 'ball'), node('c3', 'background', 'Is the sky blue?', '', scope='global'),
+                       node('c4', 'background', 'Is there grass?', '', scope='global')],
+             'comp_edges': [['b1', 'r1'], ['c1', 'c2']]}
+    graph, _, node_turn, _, warnings = to_graph(value, session, 'decompose')
+    nodes = {n['node_id']: n for n in graph['nodes']}
+    assert set(nodes) == {'c1', 'c2', 'c3', 'c4', 'c5', 'e1'}                # r1 -> c5, b1 -> e1, nothing dropped
+    assert sorted(nodes['c5']['depends_on']) == ['c1', 'e1'] and ['e1', 'c5'] in graph['comp_edges']
+    assert set(node_turn) == set(nodes) and any('renamed' in w for w in warnings)
+
+
 def test_instruction_answer_is_sanitized_and_superseded_is_kept():
     row = instruction_graph()
     assert row['superseded'] == {'2': ['t1_1']} and ['t2_1', 'i1'] not in row['graph']['comp_edges']

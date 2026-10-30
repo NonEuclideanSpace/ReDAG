@@ -96,22 +96,25 @@ def instruction_prompt(session, inventory):
             + INSTRUCTION_RULES.replace('"int_edges": [...]}', '"int_edges": [...], "superseded": {}}'))
 
 
-def extra_checklist_nodes(value, checklist):
-    """Checklist answers often add the model's own nodes for relations or rendered text (r1, t1, ...), which the
-    conditions must not contain: the conditions are exactly the checklist.  Extra entity nodes become e<k>; every
-    other extra node is dropped and the checklist items that depended on it depend on its dependencies instead.
-    Returns (value with only checklist / e<k> nodes, warnings)."""
+def extra_checklist_nodes(value, checklist, mode='checklist'):
+    """Answers often use the model's own ids (r1 for a relation, a1, t1, q41, ...).  Checklist mode: the conditions
+    must be exactly the checklist, so extra entity nodes become e<k> and every other extra node is dropped, the
+    checklist items that depended on it depending on its dependencies instead.  Decompose mode: all conditions are the
+    model's own, so extra nodes are only renamed (entities to e<k>, the rest to c<k>).
+    Returns (value with valid ids only, warnings)."""
     raw_nodes = [r for r in value.get('nodes', []) if isinstance(r, dict)]
     key = lambda raw: str(raw.get('node_id', '')).strip()
-    allowed = lambda nid: nid in checklist or re.fullmatch(r'e\d+', nid)
-    numbers = [int(key(r)[1:]) for r in raw_nodes if re.fullmatch(r'e\d+', key(r))]
-    rename, dropped, fresh = {}, {}, max(numbers, default=0) + 1
+    allowed = (lambda nid: nid in checklist or re.fullmatch(r'e\d+', nid)) if mode == 'checklist' else (lambda nid: re.fullmatch(r'[ce]\d+', nid))
+    fresh = {p: max([int(key(r)[1:]) for r in raw_nodes if re.fullmatch(p + r'\d+', key(r))], default=0) + 1 for p in 'ce'}
+    rename, dropped = {}, {}
     for raw in raw_nodes:
         nid = key(raw)
-        if not nid or allowed(nid):
+        if not nid or allowed(nid) or nid in rename or nid in dropped:
             continue
-        if str(raw.get('node_type', '')).strip().lower() == 'entity' and str(raw.get('entity_phrase') or '').strip():
-            rename[nid], fresh = f'e{fresh}', fresh + 1
+        entity = str(raw.get('node_type', '')).strip().lower() == 'entity' and str(raw.get('entity_phrase') or '').strip()
+        if entity or mode == 'decompose':
+            prefix = 'e' if entity else 'c'
+            rename[nid], fresh[prefix] = f'{prefix}{fresh[prefix]}', fresh[prefix] + 1
         else:
             dropped[nid] = [str(d).strip() for d in raw.get('depends_on') or [] if isinstance(d, (str, int))]
     if not rename and not dropped:
@@ -139,7 +142,7 @@ def extra_checklist_nodes(value, checklist):
         if isinstance(pairs, list):
             out[name] = [[rename.get(str(p[0]).strip(), p[0]), rename.get(str(p[1]).strip(), p[1])] if isinstance(p, (list, tuple)) and len(p) == 2 else p
                          for p in pairs if not (isinstance(p, (list, tuple)) and len(p) == 2 and {str(p[0]).strip(), str(p[1]).strip()} & set(dropped))]
-    warnings = ([f'extra entity nodes renamed {rename}'] if rename else []) + ([f'extra nodes dropped {sorted(dropped)}'] if dropped else [])
+    warnings = ([f'extra nodes renamed {rename}'] if rename else []) + ([f'extra nodes dropped {sorted(dropped)}'] if dropped else [])
     return out, warnings
 
 
@@ -150,8 +153,8 @@ def to_graph(value, session, mode):
     if isinstance(raw_nodes, dict):
         raw_nodes = [dict(n, node_id=k) for k, n in raw_nodes.items()]
     warnings = []
-    if mode == 'checklist' and isinstance(raw_nodes, list):
-        value, warnings = extra_checklist_nodes(dict(value, nodes=raw_nodes), checklist)
+    if mode in ('checklist', 'decompose') and isinstance(raw_nodes, list):
+        value, warnings = extra_checklist_nodes(dict(value, nodes=raw_nodes), checklist, mode)
         raw_nodes = value['nodes']
     nodes, statements, node_turn = {}, {}, {}
     for raw in raw_nodes:
@@ -366,6 +369,8 @@ def main():
     parser.add_argument('--device', default='cuda:0')
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--max_new_tokens', type=int, default=4096)
+    parser.add_argument('--max_new_tokens_decompose', type=int, default=6144,
+                        help='long requests decompose into up to 40 conditions with statements: ~4-5k tokens')
     parser.add_argument('--attempts', type=int, default=3)
     parser.add_argument('--inventory', type=int, default=24)
     parser.add_argument('--limit', type=int, help='first N sessions per file (after sharding)')
@@ -401,8 +406,11 @@ def main():
     # stay full (failed answers are retried inside the next batch instead of in a small batch of their own) and never
     # mix text-only and image sessions.  An out-of-memory batch is split in half and retried.
     size = lambda session: len(json.dumps({k: session.get(k) for k in ('prompt', 'checklist', 'turns', 'hints')}, ensure_ascii=False))
-    for mode in ('checklist', 'decompose', 'instruction'):
-        group = sorted((it for it in items if it[1] == mode), key=lambda it: -size(it[0]))
+    # text-only modes share one queue (a few leftover retries of one mode never run as a batch of their own)
+    token_limit = {'checklist': args.max_new_tokens, 'decompose': max(args.max_new_tokens, args.max_new_tokens_decompose),
+                   'instruction': args.max_new_tokens}
+    for mode, modes in (('text', ('checklist', 'decompose')), ('instruction', ('instruction',))):
+        group = sorted((it for it in items if it[1] in modes), key=lambda it: -size(it[0]))
         queue = deque(dict(session=s, mode=m, output=o, attempt=1, feedback=None, answer=None) for s, m, o in group)
         limit = args.batch_size  # image prompts (~1k image tokens) are no longer than big checklists; OOM halves the batch
         full, streak = limit, 0
@@ -410,7 +418,7 @@ def main():
             batch = [queue.popleft() for _ in range(min(limit, len(queue)))]
             prepared = [messages(it['session'], it['mode'], args.inventory, it['feedback'], it['answer']) for it in batch]
             try:
-                outputs = generate(planner, [p[0] for p in prepared], [p[1] for p in prepared], args.max_new_tokens)
+                outputs = generate(planner, [p[0] for p in prepared], [p[1] for p in prepared], max(token_limit[it['mode']] for it in batch))
             except Exception as error:  # torch.OutOfMemoryError without importing torch here
                 if 'out of memory' not in str(error).lower() or limit == 1:
                     raise
