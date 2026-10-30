@@ -91,6 +91,18 @@ def rl_on_one_gpu(s, gpu_info):
     return bool(gpu_info) and min(g['total'] for g in gpu_info) >= 90 * 1024
 
 
+def environment_version():
+    """Versions of the packages the GPU preflight validates (read from package metadata, no imports)."""
+    from importlib import metadata
+    versions = []
+    for name in ('torch', 'transformers', 'diffusers', 'peft', 'accelerate', 'bitsandbytes', 'flash-linear-attention'):
+        try:
+            versions.append(f'{name}={metadata.version(name)}')
+        except metadata.PackageNotFoundError:
+            versions.append(f'{name}=-')
+    return hashlib.sha256(';'.join(versions).encode()).hexdigest()[:12]
+
+
 def build_jobs(s, gpu_signature='', gpu_info=None):
     py, data, runs = s['PY'], Path(s['DATA']), Path(s['RUNS'])
     sft, out, D = runs / 'sft', runs / 'eval', 'scripts/data'
@@ -137,10 +149,11 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
         f'--output {sessions}/annotate_ids_checklists.txt', deps=('prep_checklists_text',), group=g)
     cpu_phase = [j.name for j in jobs]
 
-    # ---- GPU preflight (re-run whenever the code or the GPUs change)
+    # ---- GPU preflight: once per machine and software environment.  Code changes do not re-run it (that would stall every
+    # GPU job for minutes after each fix); they are covered by the unit tests and re-checked with `go.sh preflight`.
     if not s['SKIP_PREFLIGHT']:
         jobs.append(Job('preflight', ['bash', 'scripts/launch/00_check_env.sh'], gpus=1, hours=0.15, group='2 preflight', deps=('download_models',),
-                        stamp=f'{code_version()}|{gpu_signature}', env={'MIN_GPUS': '1'}, attempts=1))
+                        stamp=f'{environment_version()}|{gpu_signature}', env={'MIN_GPUS': '1'}, attempts=1))
 
     # ---- phase 2: graph annotation, sets, canvases, state grounding
     g = '3 data (GPU)'
@@ -435,7 +448,7 @@ def make_scheduler(args, s, quiet=False, gpus=None):
         if shared and ((external and re.search(external, job.name)) or (local_only and not re.search(local_only, job.name))):
             job.ready, job.waiting_for = (lambda: False), 'runs on another machine'
     orch.MILESTONES.update(MILESTONES)
-    scheduler = Scheduler(jobs, s['RUNS'], ROOT, gpus=gpus, cpu_slots=int(env('CPU_SLOTS', 0)) or (3 if info else 1),
+    scheduler = Scheduler(jobs, s['RUNS'], ROOT, gpus=gpus, cpu_slots=int(env('CPU_SLOTS', 0)) or (min(8, max(4, (os.cpu_count() or 8) // 2)) if info else 1),
                           notifier=Notifier(os.environ.get('NOTIFY_URL'), log=print), gpu_free_mib=float(env('GPU_FREE_MIB', 2000)),
                           code_version=code_version(), retry_failed=getattr(args, 'retry_failed', False),
                           max_hours=float(env('MAX_HOURS', 0)) or None, log=None if not quiet else (lambda text: None))

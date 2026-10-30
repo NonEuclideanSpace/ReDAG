@@ -39,7 +39,7 @@ bash scripts/launch/go.sh status     # what runs where, progress, ETAs, projecte
   - RL keeps all models on one GPU when every GPU has ≥ 90 GiB (`RL_LAYOUT=auto`); otherwise each RL run uses two GPUs.
   - Evaluation and rejection sampling use one GPU per process (`EVAL_LAYOUT` / `RS_LAYOUT=split` spreads them over two).
 - **Safety.**
-  - A GPU preflight (`00_check_env.sh`: weights, kernels, pytest, tiny-model wiring check including resume paths) gates every GPU job. It reruns whenever the code or the GPUs change.
+  - A GPU preflight (`00_check_env.sh`: weights, kernels, pytest, tiny-model wiring check including resume paths) gates every GPU job. It reruns when the GPUs or the package versions change; `go.sh preflight` re-checks by hand after larger code changes.
   - Settings that change results are recorded in `runs/state/config.json`. A later start with different values is refused.
 
 ## Commands (`bash scripts/launch/go.sh …`)
@@ -52,6 +52,7 @@ bash scripts/launch/go.sh status     # what runs where, progress, ETAs, projecte
 | `stop` / `drain` | stop now (jobs resume from checkpoints later) / finish running jobs, start nothing new |
 | `retry` | start and also retry jobs that failed with the current code |
 | `reload` | restart only the scheduler, e.g. after `git pull`; running jobs continue and are adopted |
+| `preflight` | re-run the GPU preflight by hand (~2 min on one GPU) |
 | `plan [--gpus 1 2 4 8] [--from-scratch]` | projected timeline for other GPU counts |
 | `reset JOB [--dependents]` | forget that jobs finished (outputs are kept) |
 | `list` | all jobs with dependencies and estimates |

@@ -42,6 +42,7 @@ case "$command" in
     start|run) start "$@" ;;
     retry) start --retry-failed "$@" ;;
     reload) "${P[@]}" stop --scheduler-only && start "$@" ;;   # pick up new code / job definitions; jobs keep running
+    preflight) MIN_GPUS=1 exec bash scripts/launch/00_check_env.sh ;;   # re-validate by hand (uses a GPU for ~2 min)
     fg) exec "${P[@]}" run "$@" ;;
     drain) exec "${P[@]}" stop --drain ;;
     *) exec "${P[@]}" "$command" "$@" ;;
