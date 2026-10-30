@@ -135,6 +135,7 @@ def test_sync_markers_follow_jobs_added_later(monkeypatch, tmp_path):
     assert '--out-format=%n' in finals
     assert '--include=runs/logs/*.done' in finals and '--exclude=runs/logs/preflight.done' in finals
     assert '--exclude=runs/logs/download_models.done' in finals and finals.index('--exclude=runs/logs/preflight.done') < finals.index('--include=runs/logs/*.done')
+    assert finals.index('--exclude=runs/state/jobs/preflight.progress') < finals.index('--include=runs/state/jobs/*.progress')
     assert len(calls) == 4 and '--exclude=runs/logs/**' in calls[1]
 
 
