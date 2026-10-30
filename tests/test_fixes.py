@@ -145,3 +145,14 @@ def test_rejection_sampling_resumes_without_duplicates(tmp_path):
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert second == {'parents': 3, 'accepted': 0, 'previously_accepted': 3}
     assert [r['id'] for r in rows] == ['s0', 's1', 's2'] and all((tmp_path / r['image']).exists() for r in rows)
+
+
+def test_saved_images_appear_only_when_complete(tmp_path, monkeypatch):
+    import os
+    from redag.verify.grounder import load_image, save_image
+    seen, real = [], os.replace
+    monkeypatch.setattr(os, 'replace', lambda a, b: seen.append((Path(a).name, Path(b).exists())) or real(a, b))
+    image = torch.rand(3, 8, 8)
+    save_image(image, tmp_path / 'a.png')
+    assert seen == [('a.png.tmp', False)] and not (tmp_path / 'a.png.tmp').exists()
+    assert torch.allclose(load_image(tmp_path / 'a.png'), (image * 255).round() / 255, atol=1e-6)

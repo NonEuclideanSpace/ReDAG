@@ -981,6 +981,35 @@ def newer_files(src, dst, ssh, filters):
     return [name for name in result.stdout.splitlines() if name and not name.endswith('/')], result
 
 
+FRESH_TREES = tuple(p[:-len('/***')] for p in SYNC_INCLUDE) + ('runs/logs',)
+
+
+def fresh_local(root, seconds):
+    cutoff, names = time.time() - seconds, []
+    for top in FRESH_TREES:
+        for folder, _, files in os.walk(Path(root) / top):
+            for name in files:
+                path = os.path.join(folder, name)
+                try:
+                    if os.stat(path).st_mtime >= cutoff:
+                        names.append('/' + os.path.relpath(path, root))
+                except OSError:
+                    continue
+    return names
+
+
+def fresh_remote(host, ssh, root, seconds):
+    command = f'cd {shlex.quote(root)} && find {" ".join(FRESH_TREES)} -type f -newermt "@$(( $(date +%s) - {int(seconds)} ))" 2>/dev/null; true'
+    result = subprocess.run(shlex.split(ssh) + [host, command], capture_output=True, text=True)
+    return ['/' + name for name in result.stdout.splitlines() if name] if result.returncode == 0 else None
+
+
+def hold_back(names):
+    with tempfile.NamedTemporaryFile('w', suffix='.fresh', delete=False) as stream:
+        stream.write(''.join(f'{name}\n' for name in names))
+    return stream.name
+
+
 def cmd_sync(args, s):
     """Exchange outputs with another machine that runs other jobs of the same pipeline (see EXTERNAL_JOBS).
 
@@ -998,26 +1027,42 @@ def cmd_sync(args, s):
     outputs = [*dirs, '--exclude=runs/logs/**', '--exclude=runs/rl/**/stage_checkpoints.json',
                *[f'--include={p}' for p in SYNC_INCLUDE], '--exclude=*']
     finals = [*dirs, *markers, '--include=runs/rl/**/stage_checkpoints.json', '--include=runs/state/release/*', '--exclude=*']
-    failed = lambda label, kind, result: print(f'{time.strftime("%T")} {label} {kind} failed ({result.returncode}): {result.stderr.strip()[-300:]}', flush=True)
+    failed = lambda label, kind, result: print(f'{time.strftime("%T")} {label} {kind} failed ({getattr(result, "returncode", "-")}): {getattr(result, "stderr", "").strip()[-300:]}', flush=True)
+    seconds = getattr(args, 'fresh', 15)
+    fresh = lambda label: fresh_remote(host, ssh, args.remote_root, seconds) if label == 'pull' else fresh_local(ROOT, seconds)
     while True:
         started = time.time()
         for label, src, dst in (('pull', remote, local), ('push', local, remote)):
-            names, result = newer_files(src, dst, ssh, finals)
-            if names is None:
-                failed(label, 'marker list', result)
-            result = rsync(src, dst, ssh, outputs, args.dry_run)
-            if result.returncode not in (0, 24):
-                failed(label, 'outputs', result)
-                continue
-            if names:
-                with tempfile.NamedTemporaryFile('w', suffix='.list', delete=False) as listing:
-                    listing.write('\n'.join(names) + '\n')
-                try:
-                    result = rsync(src, dst, ssh, finals + [f'--files-from={listing.name}'], args.dry_run)
-                finally:
-                    os.unlink(listing.name)
+            skips = []
+            try:
+                writing = fresh(label)
+                if writing is None:
+                    failed(label, 'list of files being written', None)
+                    continue
+                skips.append(hold_back(writing))
+                names, result = newer_files(src, dst, ssh, [f'--exclude-from={skips[-1]}'] + finals)
+                if names is None:
+                    failed(label, 'marker list', result)
+                writing = fresh(label)
+                if writing is None:
+                    failed(label, 'list of files being written', None)
+                    continue
+                skips.append(hold_back(writing))
+                hold = [f'--exclude-from={skips[-1]}']
+                result = rsync(src, dst, ssh, hold + outputs, args.dry_run)
                 if result.returncode not in (0, 24):
-                    failed(label, 'markers', result)
+                    failed(label, 'outputs', result)
+                    continue
+                if names:
+                    with tempfile.NamedTemporaryFile('w', suffix='.list', delete=False) as listing:
+                        listing.write('\n'.join(names) + '\n')
+                    skips.append(listing.name)
+                    result = rsync(src, dst, ssh, hold + finals + [f'--files-from={listing.name}'], args.dry_run)
+                    if result.returncode not in (0, 23, 24):
+                        failed(label, 'markers', result)
+            finally:
+                for path in skips:
+                    os.unlink(path)
         print(f'{time.strftime("%T")} sync with {args.peer} done in {time.time() - started:.0f}s', flush=True)
         if not args.loop:
             return 0
@@ -1140,6 +1185,7 @@ def main(argv=None):
     sync.add_argument('--key', default=os.path.expanduser('~/.ssh/redag_sync'))
     sync.add_argument('--remote-root', default=str(ROOT))
     sync.add_argument('--loop', type=int, default=0, help='repeat every N seconds')
+    sync.add_argument('--fresh', type=float, default=15, help='leave files modified in the last N seconds for the next round')
     sync.add_argument('--dry-run', action='store_true')
     health_parser = sub.add_parser('health', help='early-warning report (runs/HEALTH.md)')
     health_parser.add_argument('--notify', action='store_true')
