@@ -233,3 +233,31 @@ def test_evaluation_resumes_per_session(tmp_path, monkeypatch):
     assert eval_main(monkeypatch, tmp_path, exp3) == 2 * 3  # records 0 and 2, three seeds
     part = json.loads((tmp_path / 'exp3_zero_shot.s0.json').read_text())
     assert set(part['final_views']) == {'0:0', '0:1', '0:2', '2:0', '2:1', '2:2'}
+
+
+def test_experiment3_sft_stage_reuses_experiment1_sessions(tmp_path, monkeypatch):
+    data = tmp_path / 'eval.jsonl'
+    turn = {'user_prompt': 'A cup.', 'graph': {'nodes': [{'node_id': 'cup', 'node_type': 'entity', 'question': 'Is there a cup?',
+                                                         'entity_phrase': 'cup', 'scope': 'local'}]}}
+    data.write_text(''.join(json.dumps({'id': f's{i}', 'image': f'img{i}.png', 'k': 10, 'turns': [turn]}) + '\n' for i in range(3)))
+    for kind in ('controller', 'editor'):
+        (tmp_path / 'sft' / kind).mkdir(parents=True)
+    common = ['--data', data, '--allow-small-dataset', '--max_steps', 2, '--generation_budget', 3, '--verification_budget', 50]
+    exp1 = ['--exp_id', 1, '--exp1_modes', 'flat_full', 'redag_full', '--controller_adapter', tmp_path / 'sft' / 'controller',
+            '--editor_adapter', tmp_path / 'sft' / 'editor', '--output', tmp_path / 'eval' / 'exp1.s0.json']
+    assert eval_main(monkeypatch, tmp_path, common + exp1) == 6
+    stages = tmp_path / 'eval' / 'stages.json'
+    stages.write_text(json.dumps({'zero_shot': {'controller': None, 'editor': None},
+                                  'sft': {'controller': '../sft/controller', 'editor': '../sft/editor'}}))
+    exp3 = ['--exp_id', 3, '--stage_checkpoints', stages, '--stages', 'sft', '--output', tmp_path / 'eval' / 'exp3_sft.s0.json',
+            '--reuse_cases', tmp_path / 'eval' / 'exp1.s0.cases.jsonl']
+    assert eval_main(monkeypatch, tmp_path, common + exp3) == 3 * 2  # seeds 1 and 2 only; seed 0 comes from experiment 1
+    part = json.loads((tmp_path / 'eval' / 'exp3_sft.s0.json').read_text())
+    assert len(part['evaluation_cases']) == 9 and all(c['group'].startswith('sft/redag_full/') for c in part['evaluation_cases'])
+    assert all(c['id'].startswith('case_s0_sft_') for c in part['evaluation_cases'])
+    exp1_cases = {c['id'] for c in json.loads((tmp_path / 'eval' / 'exp1.s0.json').read_text())['evaluation_cases']}
+    assert set(part['final_views']) == {f'{i}:{s}' for i in range(3) for s in range(3)} and exp1_cases
+    # other budgets: nothing is reused
+    other = [a if a != 50 else 60 for a in common]
+    assert eval_main(monkeypatch, tmp_path, other + exp3[:-4] + ['--output', tmp_path / 'eval' / 'exp3_other.s0.json',
+                                                                 '--reuse_cases', tmp_path / 'eval' / 'exp1.s0.cases.jsonl']) == 9

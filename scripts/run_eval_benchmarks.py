@@ -25,7 +25,7 @@ class CaseCache:
     """
     def __init__(self, path, fingerprint):
         self.path, self.rows = Path(path), {}
-        fingerprint = json.loads(json.dumps(fingerprint))
+        fingerprint = self.fingerprint = json.loads(json.dumps(fingerprint))
         if self.path.exists():
             lines = self.path.read_text(encoding='utf-8').splitlines()
             head = json.loads(lines[0]) if lines else {}
@@ -57,6 +57,38 @@ class CaseCache:
             stream.flush()
         self.rows[key] = row
         return row
+
+
+def reusable_sessions(path, fingerprint, stages):
+    """{(stage, index, 0): experiment-1 row} for experiment-1 redag_full sessions that are exactly this run's seed-0 sessions:
+    same data, shard, seed, step and call budgets, sampling steps, models, and the stage's adapters equal to the fixed
+    weights experiment 1 used.  Anything else (or a missing file) reuses nothing."""
+    path = Path(path)
+    if not path.exists() or not fingerprint:
+        return {}
+    lines = path.read_text(encoding='utf-8').splitlines()
+    try:
+        other = json.loads(lines[0])['fingerprint']
+    except (IndexError, ValueError, KeyError):
+        return {}
+    same = ('data', 'records', 'shard', 'num_shards', 'seed', 'max_steps', 'budgets', 'num_denoise_steps', 'models')
+    if other.get('exp_id') != 1 or 'redag_full' not in other.get('modes', []) or any(other.get(k) != fingerprint.get(k) for k in same):
+        print(f'not reusing {path.name}: settings differ', flush=True)
+        return {}
+    weights = other.get('stages', {}).get('fixed_weights')
+    found = {}
+    for line in lines[1:]:
+        try:
+            row = json.loads(line)
+            stage, mode, index, seed = row['key'].split('|')
+        except (ValueError, KeyError):
+            continue
+        if stage == 'fixed_weights' and mode == 'redag_full' and seed == '0':
+            for name, checkpoints in stages.items():
+                if checkpoints == weights:
+                    found[name, int(index), 0] = row
+    print(f'reusing {len(found)} experiment-1 sessions from {path.name}', flush=True)
+    return found
 
 
 def export_case(state, dag, trace, folder, identifier, group, budget, config):
@@ -92,6 +124,8 @@ def main():
     parser.add_argument('--stages', nargs='+', choices=STAGES, help='experiment 3: run only these stages (merge parts with scripts/merge_eval_results.py)')
     parser.add_argument('--shard', type=int, default=0, help='run records with index %% num_shards == shard')
     parser.add_argument('--num_shards', type=int, default=1)
+    parser.add_argument('--reuse_cases', help="experiment 3: an experiment-1 <output>.cases.jsonl of the same shard; its redag_full "
+                        "sessions are this stage's seed-0 sessions when weights, data, budgets and seed are identical")
     args = parser.parse_args()
     if not 0 <= args.shard < args.num_shards:
         parser.error('--shard must be in [0, num_shards)')
@@ -169,6 +203,7 @@ def main():
             stages=stages, modes=modes, seed=args.seed, max_steps=args.max_steps, budgets=[args.verification_budget, args.generation_budget],
             num_denoise_steps=args.num_denoise_steps, models=[args.controller_model, args.editor_model, args.verifier_model,
                                                              args.detector_model, args.sam_model]))
+        reusable = reusable_sessions(args.reuse_cases, cache.fingerprint, stages) if args.reuse_cases and args.exp_id == 3 else {}
         work = [(stage, mode, index, seed) for stage in stages for mode in modes for index in mine for seed in seeds]
         done_count = sum(f'{stage}|{mode}|{index}|{seed}' in cache for stage, mode, index, seed in work)
         if done_count:
@@ -193,6 +228,12 @@ def main():
                             key = f'{stage}|{mode}|{index}|{seed}'
                             identifier = f'case_s{args.shard}_{stage}_{serial:06d}' if partial else f'case_{serial:06d}'
                             serial += 1
+                            if key not in cache and (stage, index, seed) in reusable:
+                                source = reusable[stage, index, seed]
+                                case = dict(source['case'], id=identifier, group=f"{stage}/{mode}/{source['k']}")
+                                cache.add(key, case=case, k=source['k'], final_image=source['final_image'], description=source['description'],
+                                          reused_from=args.reuse_cases)
+                                done_count += 1
                             if key in cache:
                                 row = cache[key]
                             else:

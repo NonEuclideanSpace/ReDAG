@@ -339,7 +339,7 @@ def execute(spec_path):
 
 class Scheduler:
     def __init__(self, jobs, runs, cwd, gpus=None, cpu_slots=None, poll=5.0, notifier=None, gpu_free_mib=2000,
-                 code_version='', retry_failed=False, log=None, max_hours=None):
+                 code_version='', retry_failed=False, log=None, max_hours=None, tick=None, tick_every=600.0):
         self.order = validate(jobs)
         self.jobs = {j.name: j for j in jobs}
         self.runs, self.cwd = Path(runs), str(cwd)
@@ -357,6 +357,7 @@ class Scheduler:
         self.events = []
         self.stopping = False
         self.retry_delay = 60.0
+        self.tick, self.tick_every, self.last_tick = tick, tick_every, 0.0  # e.g. the health report
         self.log = log or (lambda text: print(time.strftime('[%F %T] ') + text, flush=True))
         self.gpu_info, self.foreign = [], set()
 
@@ -711,6 +712,12 @@ class Scheduler:
                 if kind == 'done' and name in MILESTONES:
                     self.notifier.send(f'milestone: {name}', MILESTONES[name])
             self.events.clear()
+            if self.tick is not None and now - self.last_tick >= self.tick_every:
+                self.last_tick = now
+                try:
+                    self.tick()
+                except Exception as error:  # a broken report must never stop the pipeline
+                    self.log(f'periodic hook failed: {error!r}')
             if not self.running:
                 if all(v == 'done' for v in states.values()):
                     outcome = 'complete'
