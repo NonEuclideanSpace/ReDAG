@@ -74,6 +74,7 @@ class FluxEditor:
         self.transformer = pipeline.transformer
         self.vae = pipeline.vae
         self.dit_model = self
+        self.batched_cfg = True
         self.num_steps, self.eta, self.cfg_scale = num_steps, eta, cfg_scale
         self.vae.requires_grad_(False).eval()
         self.pipeline.text_encoder.requires_grad_(False).eval()

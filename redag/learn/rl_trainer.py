@@ -34,8 +34,14 @@ def compute_flow_sde_sigma(t, eta=0.35):
 
 
 def predict_cfg_velocity(dit_model, z_t, z_src, text_embeds, null_text_embeds, t, cfg_scale=3.5):
-    uncond = dit_model(z_t=z_t, z_src=z_src, text_embeds=null_text_embeds, timesteps=t)
-    cond = dit_model(z_t=z_t, z_src=z_src, text_embeds=text_embeds, timesteps=t)
+    if getattr(dit_model, 'batched_cfg', False) and text_embeds.shape == null_text_embeds.shape:
+        # one batch-2 forward instead of two batch-1 forwards; identical math, better GPU utilisation
+        both = dit_model(z_t=torch.cat((z_t, z_t)), z_src=torch.cat((z_src, z_src)),
+                         text_embeds=torch.cat((null_text_embeds, text_embeds)), timesteps=torch.cat((t, t)))
+        uncond, cond = both.chunk(2)
+    else:
+        uncond = dit_model(z_t=z_t, z_src=z_src, text_embeds=null_text_embeds, timesteps=t)
+        cond = dit_model(z_t=z_t, z_src=z_src, text_embeds=text_embeds, timesteps=t)
     return (1 - cfg_scale) * uncond + cfg_scale * cond
 
 
