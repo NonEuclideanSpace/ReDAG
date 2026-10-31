@@ -147,6 +147,29 @@ def test_rejection_sampling_resumes_without_duplicates(tmp_path):
     assert [r['id'] for r in rows] == ['s0', 's1', 's2'] and all((tmp_path / r['image']).exists() for r in rows)
 
 
+def test_rejection_sampling_draws_more_candidates_for_hard_targets_and_logs_groups(tmp_path):
+    from redag.learn.sft_trainer import collect_controller_rs
+    easy = {'nodes': [{'node_id': 'n0', 'node_type': 'entity', 'question': 'Is there a cup?', 'entity_phrase': 'cup',
+                       'bbox': [0.1, 0.1, 0.5, 0.5], 'scope': 'local'}]}
+    hard = {'nodes': [{'node_id': 'n0', 'node_type': 'prohibition', 'question': 'Is the image free of cups?', 'entity_phrase': 'cup',
+                       'scope': 'global'}]}
+    records = [{'id': 'easy', 'image': torch.rand(3, 16, 16), 'graph': easy, 'scores': {'n0': 0.1}},
+               {'id': 'hard', 'image': torch.rand(3, 16, 16), 'graph': hard, 'scores': {'n0': 0.1}}]
+    calls = []
+    def sample(state, graph, target, **kwargs):
+        calls.append(target)
+        return {'action': ControllerAction('remove_extra', (0.1, 0.1, 0.5, 0.5), 'Remove the cup.')}
+    controller = SimpleNamespace(sample=sample)
+    editor = SimpleNamespace(render=lambda image, act, seed: torch.ones(3, 4, 4))
+    harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.95), None)
+    output = tmp_path / 'rs.jsonl'
+    collect_controller_rs(records, harness, controller, editor, output, group_size=2, hard_multiplier=3)
+    assert len(calls) == 2 + 6
+    groups = [json.loads(line) for line in (tmp_path / 'rs.groups.jsonl').read_text().splitlines()]
+    assert [(g['id'], g['target_type'], len(g['candidates'])) for g in groups] == [('easy', 'entity', 2), ('hard', 'prohibition', 6)]
+    assert all(set(c) == {'action', 'reward', 'accepted'} for g in groups for c in g['candidates'])
+
+
 def test_saved_images_appear_only_when_complete(tmp_path, monkeypatch):
     import os
     from redag.verify.grounder import load_image, save_image
