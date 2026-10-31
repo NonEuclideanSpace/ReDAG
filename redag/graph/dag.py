@@ -75,46 +75,81 @@ def get_dependency_descendants(dag: ConditionDAG, seed_nodes: Set[str]) -> Set[s
         affected = expanded
 
 
+CANVAS: BBox = (0.0, 0.0, 1.0, 1.0)
+WHOLE_CANVAS_SHARE = 0.9
+MIN_FOOTPRINT_OVERLAP = 0.10
+
+
+def box_area(box: BBox) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def footprint_overlap(footprint: BBox, box: BBox) -> float:
+    width = min(footprint[2], box[2]) - max(footprint[0], box[0])
+    height = min(footprint[3], box[3]) - max(footprint[1], box[1])
+    if width <= 0 or height <= 0:
+        return 0.0
+    return width * height / max(box_area(footprint), 1e-08)
+
+
+def condition_parents(dag: ConditionDAG, node_id: str) -> List[str]:
+    return list(dict.fromkeys([p for p, c in dag.comp_edges if c == node_id] + [p for p, c in dag.supp_edges if c == node_id]
+                              + list(dag.nodes[node_id].depends_on)))
+
+
+def edit_footprint(dag: ConditionDAG, node_id: str) -> BBox | None:
+    node = dag.nodes[node_id]
+    if node.node_type in ('background', 'prohibition'):
+        return CANVAS
+    if node.node_type not in ('entity', 'attribute'):
+        return None
+    if node.bbox is not None:
+        return CANVAS if box_area(node.bbox) >= WHOLE_CANVAS_SHARE else node.bbox
+    if node.node_type == 'entity':
+        return None
+    owners = [p for p in condition_parents(dag, node_id) if dag.nodes[p].node_type in ('entity', 'attribute')]
+    if not owners:
+        return CANVAS
+    for owner in owners:
+        footprint = edit_footprint(dag, owner)
+        if footprint is not None:
+            return footprint
+    return None
+
+
 def compute_spatial_subgraph(dag: ConditionDAG, action: ControllerAction, target_node_id: str) -> Set[str]:
     if target_node_id not in dag.nodes:
         raise ValueError('Target condition must exist')
-    affected = {target_node_id}
-    for nid, node in dag.nodes.items():
-        if semantic_support(dag, nid) is None or boxes_intersect(node.bbox, action.box):
-            affected.add(nid)
-    return affected
+    touched = {target_node_id}
+    for nid in dag.nodes:
+        footprint = edit_footprint(dag, nid)
+        if footprint is not None and footprint_overlap(footprint, action.box) >= MIN_FOOTPRINT_OVERLAP:
+            touched.add(nid)
+    return touched
 
 
-def compute_affected_subgraph(dag: ConditionDAG, action: ControllerAction, target_node_id: str) -> Set[str]:
-    affected = compute_spatial_subgraph(dag, action, target_node_id)
-    affected |= get_dependency_descendants(dag, affected)
-    neighbors = get_int_neighbors(dag, affected)
-    for nid in affected:
-        node = dag.nodes[nid]
-        if semantic_support(dag, nid) is None:
-            continue
-        neighbors.update(other for other, candidate in dag.nodes.items()
-                         if semantic_support(dag, other) is not None and boxes_intersect(node.bbox, candidate.bbox))
-    affected |= neighbors
-    return affected | get_dependency_descendants(dag, affected)
+def compute_affected_subgraph(dag: ConditionDAG, action: ControllerAction, target_node_id: str, protected: Set[str] = frozenset()) -> Set[str]:
+    touched = compute_spatial_subgraph(dag, action, target_node_id)
+    affected = touched | get_dependency_descendants(dag, touched)
+    neighbors = get_int_neighbors(dag, affected) - affected
+    affected |= neighbors | get_dependency_descendants(dag, neighbors)
+    phrases = {dag.nodes[nid].entity_phrase for nid in touched if dag.nodes[nid].node_type in ('entity', 'count')}
+    return affected | {nid for nid, node in dag.nodes.items()
+                       if (node.node_type == 'count' and node.entity_phrase in phrases)
+                       or (node.node_type == 'prohibition' and nid in protected)}
 
-def compute_active_frontier(dag: ConditionDAG, scores: Dict[str, float], gate_tau: float=0.5) -> List[str]:
-    comp_parents: Dict[str, List[str]] = {nid: [] for nid in dag.nodes}
-    for p, c in dag.comp_edges:
-        if c in comp_parents:
-            comp_parents[c].append(p)
-    supp_parents: Dict[str, List[str]] = {nid: [] for nid in dag.nodes}
-    for b, c in dag.supp_edges:
-        if c in supp_parents:
-            supp_parents[c].append(b)
+
+def compute_active_frontier(dag: ConditionDAG, scores: Dict[str, float], gate_tau: float=0.5, gated: bool=True) -> List[str]:
     ready_candidates: List[str] = []
     for nid, node in dag.nodes.items():
         if scores.get(nid, 0.0) >= node.threshold:
             continue
-        if any((scores.get(p, 0.0) < gate_tau for p in comp_parents[nid])):
-            continue
-        if any((scores.get(b, 0.0) < dag.nodes[b].threshold for b in supp_parents[nid])):
-            continue
+        if gated:
+            parents = {p for p, c in dag.comp_edges if c == nid} | set(node.depends_on)
+            if any(scores.get(p, 0.0) < gate_tau for p in parents):
+                continue
+            if any(scores.get(b, 0.0) < dag.nodes[b].threshold for b, c in dag.supp_edges if c == nid):
+                continue
         ready_candidates.append(nid)
     ready_candidates.sort(key=lambda nid: dag.nodes[nid].weight * (1.0 - scores.get(nid, 0.0)), reverse=True)
     return ready_candidates

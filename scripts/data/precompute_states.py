@@ -26,7 +26,6 @@ def main():
     parser.add_argument('--force', action='store_true', help='recompute records that already carry scores')
     args = parser.parse_args()
     import torch
-    from redag.graph.dag import compute_active_frontier
     from redag.harness.environment import ReDAGHarness
     from redag.models.planner import dag_from_dict, dag_to_dict
     from redag.verify.grounder import Grounder, load_image
@@ -47,7 +46,7 @@ def main():
                 continue
             image = load_image((path.parent / row['image']).resolve())
             state, dag = harness.initialize(image, dag_from_dict(row['graph']))
-            frontier = compute_active_frontier(dag, state.scores, harness.config.gate_tau)
+            frontier = harness.active_frontier(dag, state.scores)
             if not frontier and not args.keep_satisfied:
                 dropped += 1
                 continue

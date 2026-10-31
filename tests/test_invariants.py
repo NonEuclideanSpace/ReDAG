@@ -91,11 +91,11 @@ def test_two_stage_uses_unpadded_original_crop_only_after_alarm():
     verifier.verify_single_node_two_stage(image, node)
     assert len(seen) == 3
 
-@pytest.mark.parametrize('kind,scope', [('attribute', 'global'), ('attribute', 'unknown'), ('count', 'local')])
-def test_remote_unique_red_condition_rejects_and_rolls_back(kind, scope):
+@pytest.mark.parametrize('kind,phrase', [('prohibition', 'red object'), ('count', 'ball')])
+def test_remote_unique_red_condition_rejects_and_rolls_back(kind, phrase):
     left, right = (0.1, 0.1, 0.3, 0.3), (0.7, 0.7, 0.9, 0.9)
     nodes = {n: ConditionNode(n, 'entity', n, n, b, scope='local') for n, b in [('cup', left), ('ball', right)]}
-    nodes['unique'] = ConditionNode('unique', kind, 'only red object', 'red object', left, scope=scope, depends_on=['cup'])
+    nodes['unique'] = ConditionNode('unique', kind, 'only red object', phrase, scope='global', depends_on=['cup'])
     dag, canvas, seen = ConditionDAG(nodes), torch.zeros(3, 20, 20), []
     canvas[0, 2:6, 2:6] = 1
     parent = CanvasState(canvas, {'cup': 1.0, 'ball': 0.1, 'unique': 1.0}, {'cup', 'unique'})
@@ -173,24 +173,39 @@ def test_sft_normalization_mask_weighting_and_half_precision_reduction():
     loss.backward()
     assert torch.isfinite(loss) and torch.isfinite(model.weight.grad)
 
-def test_dependency_coverage_fallback_and_isolated_spatial_ablation():
-    from redag.graph.dag import compute_active_frontier, compute_spatial_subgraph, semantic_support
-    left, right = (0.1, 0.1, 0.2, 0.2), (0.8, 0.8, 0.9, 0.9)
-    nodes = {n: ConditionNode(n, 'entity', n, n, b, scope='local') for n, b in [('near', left), ('far', right)]}
-    nodes['relation'] = ConditionNode('relation', 'relation', 'relation', '', right, scope='local', depends_on=['near', 'far'])
-    for name, kind in [('style', 'background'), ('count', 'count'), ('legacy', 'attribute')]:
-        nodes[name] = ConditionNode(name, kind, name, 'unrelated class', right)
-    dag, action = ConditionDAG(nodes), ControllerAction('modify_attr', left, 'Change near.')
-    assert compute_spatial_subgraph(dag, action, 'near') == {'near', 'style', 'count', 'legacy'}
-    assert compute_affected_subgraph(dag, action, 'near') == {'near', 'far', 'relation', 'style', 'count', 'legacy'}
-    assert semantic_support(dag, 'relation') == (0.1, 0.1, 0.9, 0.9)
-    dag.comp_edges = [('near', 'relation')]
+def test_affected_subgraph_follows_footprints_dependencies_and_protection():
+    from redag.graph.dag import CANVAS, compute_active_frontier, compute_spatial_subgraph, edit_footprint
+    left, right, table = (0.1, 0.1, 0.2, 0.2), (0.8, 0.8, 0.9, 0.9), (0.0, 0.15, 1.0, 0.75)
+    nodes = {n: ConditionNode(n, 'entity', n, n, b, scope=s) for n, b, s in [('near', left, 'local'), ('far', right, 'global'), ('table', table, 'local')]}
+    nodes['relation'] = ConditionNode('relation', 'relation', 'relation', '', (0.1, 0.1, 0.9, 0.9), scope='local', depends_on=['near', 'far'])
+    nodes['span'] = ConditionNode('span', 'relation', 'span', '', (0.0, 0.1, 1.0, 0.9), scope='local', depends_on=['far', 'table'])
+    nodes['far_color'] = ConditionNode('far_color', 'attribute', 'far color', 'far', None, scope='global', depends_on=['far'])
+    nodes['style'] = ConditionNode('style', 'background', 'style', 'scene')
+    nodes['lighting'] = ConditionNode('lighting', 'attribute', 'lighting', 'scene', scope='unknown')
+    nodes['ban'] = ConditionNode('ban', 'prohibition', 'ban', 'bird', scope='global')
+    nodes['near_count'] = ConditionNode('near_count', 'count', 'near count', 'near', expected_count=1, scope='global')
+    nodes['cat_count'] = ConditionNode('cat_count', 'count', 'cat count', 'cat', expected_count=2, scope='global')
+    nodes['ghost'] = ConditionNode('ghost', 'entity', 'ghost', 'ghost', scope='local')
+    nodes['ghost_size'] = ConditionNode('ghost_size', 'attribute', 'ghost size', 'ghost', scope='local', depends_on=['ghost'])
+    dag = ConditionDAG(nodes)
+    assert edit_footprint(dag, 'far') == right and edit_footprint(dag, 'far_color') == right
+    assert edit_footprint(dag, 'style') == CANVAS and edit_footprint(dag, 'lighting') == CANVAS
+    assert edit_footprint(dag, 'ghost') is None and edit_footprint(dag, 'ghost_size') is None and edit_footprint(dag, 'span') is None
+    small = ControllerAction('modify_attr', left, 'Change near.')
+    protected = set(nodes) - {'near'}
+    assert compute_spatial_subgraph(dag, small, 'near') == {'near'}
+    assert compute_affected_subgraph(dag, small, 'near', protected) == {'near', 'relation', 'near_count', 'ban'}
+    assert compute_affected_subgraph(dag, small, 'near') == {'near', 'relation', 'near_count'}
+    assert compute_affected_subgraph(dag, ControllerAction('add_entity', (0.4, 0.4, 0.5, 0.5), 'Add a ghost in the gap.'), 'ghost', protected) == {'ghost', 'ghost_size', 'ban'}
+    large = ControllerAction('modify_attr', (0.0, 0.0, 0.5, 0.5), 'Change the left half.')
+    assert compute_spatial_subgraph(dag, large, 'near') == {'near', 'table', 'style', 'lighting', 'ban'}
+    dag.int_edges = [('near', 'far')]
+    assert compute_affected_subgraph(dag, small, 'near') == {'near', 'far', 'far_color', 'relation', 'span', 'near_count'}
     scores = {n: 0.1 if n in ('near', 'relation') else 0.9 for n in nodes}
-    for mode, ready in [('spatial_local', False), ('spatial_no_gates', True)]:
-        graph = ReDAGHarness(TwoStageVerifier(None), None, mode=mode).effective_graph(dag)
-        assert ('relation' in compute_active_frontier(graph, scores)) == ready
-    nodes['near'].bbox = None
-    assert semantic_support(dag, 'relation') is None and 'relation' in compute_spatial_subgraph(dag, action, 'far')
+    assert 'relation' not in compute_active_frontier(dag, scores) and 'relation' in compute_active_frontier(dag, scores, gated=False)
+    dag.comp_edges = [('near', 'relation')]
+    for mode, ready in [('redag_full', False), ('spatial_local', False), ('spatial_no_gates', True), ('flat_full', True)]:
+        assert ('relation' in ReDAGHarness(TwoStageVerifier(None), None, mode=mode).active_frontier(dag, scores)) == ready
     with pytest.raises(ValueError):
         ConditionDAG({'bad': ConditionNode('bad', 'attribute', 'bad', '', right, scope='local', depends_on=['missing'])})
 

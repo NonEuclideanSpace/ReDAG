@@ -148,9 +148,8 @@ def relative_lora_displacement(parameters, snapshot):
 
 def select_failed_parent(record, harness):
     from redag.harness.environment import state_from_record
-    from redag.graph.dag import compute_active_frontier
     state, dag = state_from_record(record, harness)
-    frontier = compute_active_frontier(dag, state.scores, harness.verifier.gate_tau)
+    frontier = harness.active_frontier(dag, state.scores)
     target = record.get('target_node_id')
     return state, dag, target if target in frontier else frontier[0] if frontier else None
 
@@ -404,7 +403,7 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
                     torch.cuda.reset_peak_memory_stats(device)
                 started = time.perf_counter()
                 groups, rewards_all, advantages_all, old = [], [], [], controller.snapshot()
-                areas, ops = [], {}
+                areas, ops, shares = [], {}, []
                 for parent_index, record in enumerate(order[start:start + batch_size]):
                     state, dag, target = select_failed_parent(record, harness)
                     if target is None:
@@ -430,6 +429,7 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
                             save_training_audit(output, f'{reward_mode}_{step}_{parent_index}_{index}', state, delivered, dag, affected, reward_mode, stage, step, harness.lam)
                         rewards.append(ablation_reward(reward_mode, state, delivered, dag, reward, harness, controller, editor, rollout_steps))
                         items.append(item)
+                        shares.append(len(affected) / len(dag.nodes))
                         areas.append(max(0.0, action.box[2] - action.box[0]) * max(0.0, action.box[3] - action.box[1]))
                         ops[action.op] = ops.get(action.op, 0) + 1
                     values = torch.tensor(rewards)
@@ -454,7 +454,8 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
                                advantage_variance=float(torch.tensor(advantages_all).var(unbiased=False)) if advantages_all else 0.0,
                                mean_reward=sum(rewards_all) / max(len(rewards_all), 1),
                                action_box_area_mean=sum(areas) / max(len(areas), 1),
-                               action_full_box_share=sum(a >= 0.95 for a in areas) / max(len(areas), 1), action_ops=ops)
+                               action_full_box_share=sum(a >= 0.95 for a in areas) / max(len(areas), 1), action_ops=ops,
+                               affected_share_mean=sum(shares) / max(len(shares), 1))
                 with metrics_path.open('a') as stream:
                     stream.write(json.dumps(metrics, allow_nan=False) + '\n')
                 history.append(metrics)
