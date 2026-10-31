@@ -25,7 +25,7 @@ class ReDAGHarness:
         self.cost_budget, self.generation_cost, self.cost_origin, self.budget_per_turn = None, 1.0, None, False
         self.generation_counter, self.last_run, self.unknown_nodes = 0, {}, set()
         self.retry_limit = 2
-        self.protect_masks, self.mask_margin, self.container_share, self.min_editable = False, 16, 0.5, 0.2
+        self.protect_masks, self.mask_margin, self.container_share, self.min_editable_pixels = False, 16, 0.5, 1024
 
     def effective_graph(self, dag):
         if self.mode not in ('redag_full', 'flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates'):
@@ -110,14 +110,22 @@ class ReDAGHarness:
                 keep.update(p for p in condition_parents(dag, nid) if dag.nodes[p].node_type == 'entity' and p not in free)
         height, width = state.image.shape[-2:]
         x1, y1, x2, y2 = defnorm_box_to_pixel_slice(action.box, height, width)
-        layers = [self.grounder.masks[nid].to(state.image.device).float() for nid in sorted(keep) if nid in self.grounder.masks]
-        layers = [layer for layer in layers if layer[y1:y2, x1:x2].mean() <= self.container_share]
+        window = (slice(y1, y2), slice(x1, x2))
+        layers = []
+        for nid in sorted(keep):
+            if nid not in self.grounder.masks:
+                continue
+            layer = self.grounder.masks[nid].to(state.image.device).float()
+            inside = float(layer[window].sum())
+            if inside > self.container_share * (y2 - y1) * (x2 - x1) and inside < self.container_share * float(layer.sum()):
+                continue
+            layers.append(layer)
         if not layers:
             return None
         margin = self.mask_margin
         union = F.max_pool2d(torch.stack(layers).amax(0)[None, None], kernel_size=2 * margin + 1, stride=1, padding=margin)[0, 0]
         editable = 1 - union
-        if editable[y1:y2, x1:x2].mean() < self.min_editable:
+        if float(editable[window].sum()) < self.min_editable_pixels:
             return None
         return editable
 

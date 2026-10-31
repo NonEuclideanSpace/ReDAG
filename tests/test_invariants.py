@@ -354,16 +354,19 @@ def test_local_edits_keep_verified_protected_entities_out_of_the_editable_mask()
     state = CanvasState(torch.zeros(3, 40, 40), scores, {'cat', 'cup', 'dog', 'ball', 'mat'})
     action = ControllerAction('modify_attr', (0.2, 0.2, 0.4, 0.4), 'Fix it.')
     harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.9), grounder)
-    harness.mask_margin = 2
+    harness.mask_margin, harness.min_editable_pixels = 2, 10
     assert harness.editable_mask(state, dag, 'red', action) is None
     harness.protect_masks = True
     red = harness.editable_mask(state, dag, 'red', action)
     assert red[14, 14] == 0 and red[10, 10] == 0 and red[9, 9] == 1 and red[8, 8] == 1 and red[33, 33] == 1 and red[7, 7] == 1
     sky = harness.editable_mask(state, dag, 'sky', action)
     assert sky[5, 5] == 0 and sky[14, 14] == 0 and sky[33, 33] == 1 and sky[20, 5] == 1 and sky[27, 27] == 1
-    harness.min_editable = 0.9
+    harness.min_editable_pixels = 30
     assert harness.editable_mask(state, dag, 'red', action) is None
-    harness.min_editable = 0.2
+    harness.min_editable_pixels = 10
+    whole = ControllerAction('modify_attr', (0.0, 0.0, 1.0, 1.0), 'Restyle.')
+    full = harness.editable_mask(state, dag, 'sky', whole)
+    assert full[12, 12] == 0 and full[33, 33] == 0 and full[5, 33] == 0 and full[25, 5] == 1
     seen = []
     def render(image, action, seed, mask=None):
         seen.append(mask)
