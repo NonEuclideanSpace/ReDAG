@@ -22,7 +22,7 @@ class ReDAGHarness:
         self.verifier.gate_tau = self.config.gate_tau
         self.mode, self.history, self.last_candidate = mode, [], None
         self.verification_budget = self.generation_budget = self.render_limit = None
-        self.cost_budget, self.generation_cost, self.cost_origin = None, 1.0, None
+        self.cost_budget, self.generation_cost, self.cost_origin, self.budget_per_turn = None, 1.0, None, False
         self.generation_counter, self.last_run, self.unknown_nodes = 0, {}, set()
         self.retry_limit = 2
         self.protect_masks, self.mask_margin, self.container_share, self.min_editable = False, 16, 0.5, 0.2
@@ -291,11 +291,12 @@ def run_record(record, harness, controller, editor, max_steps=10, seed=42, group
     calls, renders = harness.verifier.call_counter, harness.generation_counter
     limits = harness.verifier.call_limit, harness.render_limit
     harness.history, harness.last_run, harness.unknown_nodes = [], {}, set()
-    harness.cost_origin = (calls, renders)
-    verification_limits = [x for x in (limits[0], calls + harness.verification_budget if harness.verification_budget is not None else None) if x is not None]
-    generation_limits = [x for x in (limits[1], renders + harness.generation_budget if harness.generation_budget is not None else None) if x is not None]
-    harness.verifier.call_limit = min(verification_limits, default=None)
-    harness.render_limit = min(generation_limits, default=None)
+    if not harness.budget_per_turn:
+        harness.cost_origin = (calls, renders)
+        verification_limits = [x for x in (limits[0], calls + harness.verification_budget if harness.verification_budget is not None else None) if x is not None]
+        generation_limits = [x for x in (limits[1], renders + harness.generation_budget if harness.generation_budget is not None else None) if x is not None]
+        harness.verifier.call_limit = min(verification_limits, default=None)
+        harness.render_limit = min(generation_limits, default=None)
     try:
         if 'turns' in record:
             if not record['turns']:
