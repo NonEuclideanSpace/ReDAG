@@ -42,6 +42,11 @@ def compare(a, b):
     return '%.2f vs %.2f (better %d worse %d p %.3f)' % (mean(a), mean(b), wins, losses, sign_p(wins, losses))
 
 
+def contrast(a, b):
+    higher, lower = sum(x > y for x, y in zip(a, b)), sum(x < y for x, y in zip(a, b))
+    return '%.2f vs %.2f (higher %d lower %d p %.3f)' % (mean(a), mean(b), higher, lower, sign_p(higher, lower))
+
+
 def load_sessions(paths, skip, parents):
     sessions, components = {}, Counter()
     for path in paths:
@@ -105,9 +110,9 @@ def main():
         if not keys:
             continue
         get = lambda label, field, ks: [sessions[label, i, s][field] for i, s in ks]
-        print('PAIR %s vs %s n %d accepted %s consistent %s damage %.2f vs %.2f verifier %.1f vs %.1f' % (base, other, len(keys), compare(get(base, 'accepted', keys), get(other, 'accepted', keys)),
+        print('PAIR %s vs %s n %d accepted %s consistent %s damage %s verifier %s' % (base, other, len(keys), compare(get(base, 'accepted', keys), get(other, 'accepted', keys)),
               compare(get(base, 'consistent', keys), get(other, 'consistent', keys)),
-              mean(get(base, 'damage', keys)), mean(get(other, 'damage', keys)), mean(get(base, 'verifier', keys)), mean(get(other, 'verifier', keys))))
+              contrast(get(base, 'damage', keys), get(other, 'damage', keys)), contrast(get(base, 'verifier', keys), get(other, 'verifier', keys))))
         subsets = [('K=%d' % k, lambda i, s, k=k: sessions[base, i, s]['k'] == k) for k in (10, 20, 30)]
         subsets += [('turns<=2', lambda i, s: turns[i] <= 2), ('turns>=3', lambda i, s: turns[i] >= 3),
                     ('sparse deps', lambda i, s: edges[i] / max(1, sessions[base, i, s]['k']) < cut),
