@@ -30,6 +30,7 @@ def test_protected_pixels_inside_the_window_are_copied_from_the_canvas():
     assert torch.equal(out[:, 16:20, 16:48], torch.ones(3, 4, 32))
     with pytest.raises(ValueError):
         paste_window_strictly_local(canvas, crop, (0.25, 0.25, 0.75, 0.75), editable=torch.full((64, 64), 0.5))
+    assert float(paste_window_strictly_local(torch.zeros(3, 20, 20), torch.ones(3, 2, 2), (0.0, 0.0, 1.0, 1.0)).max()) == 1.0
 
 
 def test_eq4_eq5_subgraph_isolation_and_zero_delta():
@@ -275,6 +276,24 @@ def test_session_moves_on_after_two_failed_attempts_on_one_target():
     harness.retry_limit = 10
     _, _, trace = harness.run_session(parent, dag, controller, editor, max_steps=4, group_size=1)
     assert [step['target_node_id'] for step in trace] == ['a', 'a', 'a', 'a']
+
+def test_cost_budget_counts_generations_and_verifier_calls_together():
+    nodes = {f'n{i}': ConditionNode(f'n{i}', 'entity', f'n{i}', f'n{i}', (0.8, 0.8, 0.9, 0.9) if i else (0.1, 0.1, 0.2, 0.2), scope='local') for i in range(20)}
+    dag = ConditionDAG(nodes)
+    parent = CanvasState(torch.zeros(3, 20, 20), {n: 0.1 if n == 'n0' else 0.9 for n in nodes}, set(nodes) - {'n0'})
+    controller = SimpleNamespace(sample=lambda state, graph, target, **kwargs: {'action': ControllerAction('add_entity', (0.1, 0.1, 0.2, 0.2), 'Add it.')})
+    editor = SimpleNamespace(render=lambda *args, **kwargs: torch.ones(3, 2, 2))
+    harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.2), None, mode='flat_full')
+    harness.cost_budget, harness.generation_cost = 25.0, 10.0
+    _, _, trace = harness.run_session(parent, dag, controller, editor, max_steps=3, group_size=3)
+    assert len(trace) == 1 and harness.last_run == dict(generation_calls=1, verifier_calls=20, stop_reason='execution_budget', unknown_node_ids=[])
+    assert harness.cost_origin is None
+    _, _, trace = harness.run_session(parent, dag, controller, editor, max_steps=3, group_size=3)
+    assert len(trace) == 1 and harness.last_run['generation_calls'] == 1
+    harness.cost_budget = None
+    _, _, trace = harness.run_session(parent, dag, controller, editor, max_steps=3, group_size=3)
+    assert len(trace) == 3 and harness.last_run['generation_calls'] == 9
+
 
 @pytest.mark.parametrize('budget', [1, 2])
 def test_local_budget_spent_per_call_and_sibling_grounding_is_restored(budget):
