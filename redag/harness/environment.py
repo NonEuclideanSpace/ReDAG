@@ -3,7 +3,7 @@ from dataclasses import asdict
 import torch
 from redag.config import ReDAGConfig
 from redag.graph.schema import CanvasState, ConditionDAG
-from redag.graph.dag import compute_active_frontier, compute_affected_subgraph, compute_spatial_subgraph, get_dependency_descendants, semantic_support
+from redag.graph.dag import compute_active_frontier, compute_affected_subgraph, compute_spatial_subgraph, edit_footprint, get_dependency_descendants
 from redag.edit.compositor import check_local_acceptance, paste_window_strictly_local
 from redag.learn.credit import compute_subgraph_reward
 
@@ -29,6 +29,9 @@ class ReDAGHarness:
         for parent, child in dag.comp_edges + dag.supp_edges:
             nodes[child].depends_on = sorted(set(nodes[child].depends_on) | {parent})
         return ConditionDAG(nodes)
+
+    def active_frontier(self, dag, scores):
+        return compute_active_frontier(self.effective_graph(dag), scores, self.config.gate_tau, gated=self.mode in ('redag_full', 'spatial_local'))
 
     def grounding_state(self):
         return (dict(self.grounder.counts), dict(self.grounder.masks)) if self.grounder else None
@@ -62,12 +65,12 @@ class ReDAGHarness:
         self.verifier.two_stage = self.mode != 'flat_full'
         candidate = paste_window_strictly_local(parent_state.image, edited_crop, action.box, self.feather_px)
         if self.mode == 'redag_full':
-            affected = compute_affected_subgraph(dag, action, target_node_id)
+            affected = compute_affected_subgraph(dag, action, target_node_id, parent_state.protected_set)
         elif self.mode in ('spatial_local', 'spatial_no_gates'):
             affected = compute_spatial_subgraph(dag, action, target_node_id)
         else:
             affected = set(graph.nodes)
-        uncertain = {n for n, node in dag.nodes.items() if node.scope != 'global' and node.node_type not in ('background', 'count', 'prohibition') and semantic_support(dag, n) is None}
+        uncertain = {n for n, node in dag.nodes.items() if node.node_type in ('entity', 'attribute') and edit_footprint(dag, n) is None}
         raw_scores = self.verifier.verify_subgraph_after_edit(candidate, graph, parent_state.scores, affected)
         accepted = check_local_acceptance(graph, target_node_id, parent_state.scores, raw_scores, parent_state.protected_set, affected,
                                          self.config.min_target_gain, self.config.max_protected_drop)
@@ -127,7 +130,7 @@ class ReDAGHarness:
                 if self.unknown_nodes:
                     reason = 'execution_budget'
                     break
-                frontier = compute_active_frontier(self.effective_graph(dag), state.scores, self.config.gate_tau)
+                frontier = self.active_frontier(dag, state.scores)
                 if not frontier:
                     reason = 'satisfied' if all(state.scores[n] >= dag.nodes[n].threshold for n in dag.nodes) else 'blocked_frontier'
                     break

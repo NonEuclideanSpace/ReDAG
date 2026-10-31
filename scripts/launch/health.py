@@ -179,9 +179,13 @@ def rl(runs):
         guards = sum(1 for s in steps if s.get('ratio_guard_hit'))
         gain = statistics.fmean(s.get('dev_acceptance_gain', 0.0) for s in recent)
         full_boxes = statistics.fmean(s.get('action_full_box_share', 0.0) for s in recent)
+        shares = [s['affected_share_mean'] for s in recent if 'affected_share_mean' in s]
+        affected = statistics.fmean(shares) if shares else None
         problems = []
         if full_boxes > 0.6:
             problems.append(f'{full_boxes:.0%} of recent actions edit the whole image (window compositing no longer protects the rest)')
+        if affected is not None and affected >= 0.9:
+            problems.append(f'affected subgraphs cover {affected:.0%} of the graph (local verification and subgraph credit act on the full table)')
         if no_update > 0.5:
             problems.append(f'{no_update:.0%} of steps made no update (no learning signal)')
         if same_rewards > 0.5:
@@ -196,7 +200,7 @@ def rl(runs):
         out.append(item(f'rl/{name}', '3 RL', status,
                         f"step {last.get('step')} ({last.get('stage')}): dev acceptance {last.get('dev_acceptance_p', 0):.2f} "
                         f"(stage start {last.get('dev_initial_acceptance_p', 0):.2f}), mean reward {last.get('mean_reward', 0):.3f}, "
-                        f"whole-image boxes {full_boxes:.0%}",
+                        f"whole-image boxes {full_boxes:.0%}" + (f", affected subgraph {affected:.0%} of the graph" if affected is not None else ''),
                         '; '.join(problems)))
     return out
 
@@ -210,13 +214,24 @@ def evaluations(runs):
             if not isinstance(case, dict) or '/' not in str(case.get('group', '')):
                 continue
             stage, mode, _ = case['group'].rsplit('/', 2)
-            g = groups.setdefault(f'{experiment}:{stage}/{mode}', {'n': 0, 'satisfied': 0, 'steps': 0, 'accepted': 0})
+            g = groups.setdefault(f'{experiment}:{stage}/{mode}', {'n': 0, 'satisfied': 0, 'steps': 0, 'accepted': 0, 'shares': []})
             g['n'] += 1
             g['satisfied'] += (case.get('execution') or {}).get('stop_reason') == 'satisfied'
             g['steps'] += len(case.get('steps', []))
             g['accepted'] += sum(1 for s in case.get('steps', []) if s.get('accepted'))
-    out = [item(f'eval/{key}', '4 eval', OK, f"{g['n']} sessions: all conditions met in {g['satisfied'] / g['n']:.0%}, "
-                f"{g['accepted'] / max(g['steps'], 1):.0%} of edit steps accepted") for key, g in groups.items()]
+            for s in case.get('steps', []):
+                nodes = ((case.get('views') or {}).get(s.get('before')) or {}).get('nodes')
+                if nodes and mode == 'redag_full':
+                    g['shares'].append(len(s.get('affected') or ()) / len(nodes))
+    out = []
+    for key, g in groups.items():
+        share = statistics.fmean(g['shares']) if g['shares'] else None
+        out.append(item(f'eval/{key}', '4 eval', WARN if share is not None and share >= 0.9 else OK,
+                        f"{g['n']} sessions: all conditions met in {g['satisfied'] / g['n']:.0%}, "
+                        f"{g['accepted'] / max(g['steps'], 1):.0%} of edit steps accepted"
+                        + (f", affected subgraph {share:.0%} of the graph" if share is not None else ''),
+                        'affected subgraphs cover almost the whole graph: local verification degenerates to a full check'
+                        if share is not None and share >= 0.9 else ''))
     exp1 = {key.split('/')[-1]: g for key, g in groups.items() if key.startswith('exp1:')}
     if {'redag_full', 'flat_full'} <= set(exp1) and min(exp1['redag_full']['n'], exp1['flat_full']['n']) >= 30:
         ours, flat = (exp1[m]['satisfied'] / exp1[m]['n'] for m in ('redag_full', 'flat_full'))

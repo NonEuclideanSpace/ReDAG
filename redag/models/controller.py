@@ -73,7 +73,7 @@ class Controller(Planner):
         node = dag.nodes[target_node_id]
         box = node.bbox or (0.0, 0.0, 1.0, 1.0)
         failure = classify_failure_mode(dag, target_node_id, state.scores, detected_count)
-        affected = compute_affected_subgraph(dag, ControllerAction(OPS[failure], box, node.question), target_node_id)
+        affected = compute_affected_subgraph(dag, ControllerAction(OPS[failure], box, node.question), target_node_id, state.protected_set)
         summary = [{"question": dag.nodes[nid].question, "score": state.scores[nid],
                     "protected": nid in state.protected_set, "bbox": dag.nodes[nid].bbox}
                    for nid in dag.nodes if nid in affected]

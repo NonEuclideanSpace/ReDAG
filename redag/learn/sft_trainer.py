@@ -172,7 +172,6 @@ def collect_controller_rs(records, harness, controller, editor, output, seed=42,
     import json
     from dataclasses import asdict
     from pathlib import Path
-    from redag.graph.dag import compute_active_frontier
     from redag.harness.environment import state_from_record
     from redag.models.planner import dag_to_dict
     from redag.verify.grounder import save_image
@@ -198,7 +197,7 @@ def collect_controller_rs(records, harness, controller, editor, output, seed=42,
             if identifier in done:
                 continue
             state, dag = state_from_record(record, harness)
-            frontier = compute_active_frontier(dag, state.scores, harness.config.gate_tau)
+            frontier = harness.active_frontier(dag, state.scores)
             if not frontier:
                 continue
             candidates = harness.sample_group(state, dag, controller, editor, frontier[0], 3, seed + index * 3)

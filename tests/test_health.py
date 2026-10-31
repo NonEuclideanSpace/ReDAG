@@ -57,6 +57,23 @@ def test_rl_health_flags_a_policy_that_edits_the_whole_image(tmp_path):
     assert next(c for c in health.rl(runs) if c['key'] == 'rl/main')['status'] == 'ok'
 
 
+def test_health_flags_affected_subgraphs_that_cover_the_whole_graph(tmp_path):
+    runs = tmp_path / 'runs'
+    write(runs / 'rl/main/metrics.jsonl', [dict(step=i, stage='ctrl_rl', optimizer_updates=1, reward_variance=0.1, kl_early_stop=False,
+                                                dev_acceptance_p=0.4, dev_initial_acceptance_p=0.4, dev_acceptance_gain=0.0, mean_reward=0.2,
+                                                action_full_box_share=0.1, affected_share_mean=share) for i, share in enumerate([0.3] * 4 + [0.95] * 8)])
+    check = next(c for c in health.rl(runs) if c['key'] == 'rl/main')
+    assert check['status'] == 'warn' and 'full table' in check['detail'] and 'affected subgraph 95% of the graph' in check['value']
+    views = {'b': {'nodes': {n: {} for n in 'abcd'}}}
+    cases = [{'case': {'group': f'fixed_weights/{mode}/10', 'views': views, 'execution': {'stop_reason': 'step_budget'},
+                       'steps': [{'before': 'b', 'affected': list('abcd' if mode == 'redag_full' else 'a'), 'accepted': True}]}}
+             for mode in ('redag_full', 'flat_full')]
+    write(runs / 'eval/exp1.s0.cases.jsonl', [{'fingerprint': 'x'}] + cases)
+    checks = {c['key']: c for c in health.evaluations(runs)}
+    assert checks['eval/exp1:fixed_weights/redag_full']['status'] == 'warn' and '100% of the graph' in checks['eval/exp1:fixed_weights/redag_full']['value']
+    assert checks['eval/exp1:fixed_weights/flat_full']['status'] == 'ok'
+
+
 def test_gates_hold_jobs_until_released(tmp_path, monkeypatch):
     import pipeline
     for name in ('CLAIMS_HOST', 'LOCAL_JOBS', 'EXTERNAL_JOBS', 'SHARED_JOBS', 'NOT_BEFORE', 'SYNC_PEER'):
