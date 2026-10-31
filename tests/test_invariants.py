@@ -291,40 +291,42 @@ def test_local_budget_spent_per_call_and_sibling_grounding_is_restored(budget):
     assert len(candidates) == 2 and seen == [3, 3, 3] and grounder.counts == {'n0': 3}
 
 
-def test_local_edits_keep_protected_entities_out_of_the_editable_mask():
+def test_local_edits_keep_verified_protected_entities_out_of_the_editable_mask():
     nodes = {'cat': ConditionNode('cat', 'entity', 'cat', 'cat', (0.0, 0.0, 0.5, 0.5), scope='local'),
              'red': ConditionNode('red', 'attribute', 'red', 'cat', None, scope='local'),
-             'dog': ConditionNode('dog', 'entity', 'dog', 'dog', (0.5, 0.5, 1.0, 1.0), scope='local'),
              'cup': ConditionNode('cup', 'entity', 'cup', 'cup', (0.5, 0.0, 1.0, 0.5), scope='local'),
+             'dog': ConditionNode('dog', 'entity', 'dog', 'dog', (0.5, 0.5, 1.0, 1.0), scope='local'),
+             'ball': ConditionNode('ball', 'entity', 'ball', 'ball', (0.3, 0.3, 0.6, 0.6), scope='local'),
+             'mat': ConditionNode('mat', 'entity', 'mat', 'mat', (0.15, 0.15, 0.45, 0.45), scope='local'),
              'sky': ConditionNode('sky', 'background', 'sky', 'sky', None, scope='global')}
     dag = ConditionDAG(nodes, comp_edges=[('cat', 'red')], int_edges=[('cat', 'cup')])
-    masks = {name: torch.zeros(40, 40, dtype=torch.bool) for name in ('cat', 'dog', 'cup')}
-    masks['cat'][2:10, 2:10], masks['dog'][30:38, 30:38], masks['cup'][2:10, 30:38] = True, True, True
+    masks = {name: torch.zeros(40, 40, dtype=torch.bool) for name in ('cat', 'cup', 'dog', 'ball', 'mat')}
+    masks['cat'][2:10, 2:10], masks['cup'][2:10, 30:38], masks['dog'][30:38, 30:38] = True, True, True
+    masks['ball'][12:24, 12:24], masks['mat'][6:18, 6:18] = True, True
     grounder = SimpleNamespace(counts={}, masks=masks, ground=lambda image, graph, selected=None: graph)
-    state = CanvasState(torch.zeros(3, 40, 40), {'cat': 0.9, 'red': 0.1, 'dog': 0.9, 'cup': 0.9, 'sky': 0.1}, {'cat', 'dog', 'cup'})
+    scores = {'cat': 0.9, 'red': 0.1, 'cup': 0.9, 'dog': 0.9, 'ball': 0.9, 'mat': 0.9, 'sky': 0.1}
+    state = CanvasState(torch.zeros(3, 40, 40), scores, {'cat', 'cup', 'dog', 'ball', 'mat'})
+    action = ControllerAction('modify_attr', (0.2, 0.2, 0.4, 0.4), 'Fix it.')
     harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.9), grounder)
     harness.mask_margin = 2
-    assert harness.editable_mask(state, dag, 'red') is None
+    assert harness.editable_mask(state, dag, 'red', action) is None
     harness.protect_masks = True
-    red = harness.editable_mask(state, dag, 'red')
-    assert red[5, 5] == 1 and red[5, 33] == 1 and red[33, 33] == 0 and red[28, 33] == 0 and red[25, 33] == 1
-    sky = harness.editable_mask(state, dag, 'sky')
-    assert sky[5, 5] == 0 and sky[5, 33] == 0 and sky[33, 33] == 0 and sky[20, 20] == 1
+    red = harness.editable_mask(state, dag, 'red', action)
+    assert red[14, 14] == 0 and red[10, 10] == 0 and red[9, 9] == 1 and red[8, 8] == 1 and red[33, 33] == 1 and red[7, 7] == 1
+    sky = harness.editable_mask(state, dag, 'sky', action)
+    assert sky[5, 5] == 0 and sky[14, 14] == 0 and sky[33, 33] == 1 and sky[20, 5] == 1 and sky[27, 27] == 1
+    harness.min_editable = 0.9
+    assert harness.editable_mask(state, dag, 'red', action) is None
+    harness.min_editable = 0.2
     seen = []
     def render(image, action, seed, mask=None):
         seen.append(mask)
-        x1, y1, x2, y2 = (round(v * 40) for v in action.box)
-        if mask is not None and not mask[y1:y2, x1:x2].any():
-            raise ValueError('The editable mask must be binary and nonempty')
-        return torch.ones(3, y2 - y1, x2 - x1)
-    def controller(box):
-        return SimpleNamespace(sample=lambda state, graph, target, **kwargs: {'action': ControllerAction('modify_attr', box, 'Fix it.')})
-    harness.sample_group(state, dag, controller((0.2, 0.2, 0.4, 0.4)), SimpleNamespace(render=render), 'red', group_size=1)
-    harness.sample_group(state, dag, controller((0.2, 0.2, 0.4, 0.4)), SimpleNamespace(render=render), 'sky', group_size=1)
-    candidates = harness.sample_group(state, dag, controller((0.0, 0.0, 0.25, 0.25)), SimpleNamespace(render=render), 'sky', group_size=1)
-    assert torch.equal(seen[0], red) and torch.equal(seen[1], sky) and torch.equal(seen[2], sky) and seen[3] is None and len(candidates) == 1
+        return torch.ones(3, 8, 8)
+    controller = SimpleNamespace(sample=lambda state, graph, target, **kwargs: {'action': action})
+    candidates = harness.sample_group(state, dag, controller, SimpleNamespace(render=render), 'red', group_size=1)
+    assert len(candidates) == 1 and torch.equal(seen[0], red)
     harness.mode = 'spatial_no_gates'
-    assert harness.editable_mask(state, dag, 'red') is None
+    assert harness.editable_mask(state, dag, 'red', action) is None
 
 
 def test_local_windows_render_at_a_working_resolution_with_context(monkeypatch):
