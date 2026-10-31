@@ -4,8 +4,8 @@ import torch
 import torch.nn.functional as F
 from redag.config import ReDAGConfig
 from redag.graph.schema import CanvasState, ConditionDAG, ControllerAction
-from redag.graph.dag import (CANVAS, MIN_FOOTPRINT_OVERLAP, compute_active_frontier, compute_affected_subgraph, compute_spatial_subgraph, condition_parents,
-                             edit_footprint, footprint_overlap, get_dependency_descendants, get_int_neighbors, semantic_support, topological_nodes)
+from redag.graph.dag import (CANVAS, MIN_FOOTPRINT_OVERLAP, WHOLE_CANVAS_SHARE, box_area, compute_active_frontier, compute_affected_subgraph, compute_spatial_subgraph,
+                             condition_parents, edit_footprint, footprint_overlap, get_dependency_descendants, get_int_neighbors, semantic_support, topological_nodes)
 from redag.edit.compositor import check_local_acceptance, defnorm_box_to_pixel_slice, paste_window_strictly_local
 from redag.learn.credit import compute_subgraph_reward
 from redag.verify.verifier import expand_bbox_with_margin
@@ -24,6 +24,14 @@ def requirement_statement(node):
         if phrase and lower.startswith(head):
             return f'the {phrase} {verb} {text[len(head):]}'
     return f'the answer to "{node.question.strip()}" is yes'
+
+
+def strong_edges(dag):
+    nodes = deepcopy(dag.nodes)
+    for node in nodes.values():
+        node.depends_on = [p for p in node.depends_on if node.node_type in ('attribute', 'relation', 'count') and dag.nodes[p].node_type == 'entity']
+    comp = [(p, c) for p, c in dag.comp_edges if dag.nodes[p].node_type == 'entity' and dag.nodes[c].node_type == 'attribute']
+    return ConditionDAG(nodes, comp_edges=comp)
 
 
 def compose_instruction(instruction, statements):
@@ -47,12 +55,13 @@ class ReDAGHarness:
         self.retry_limit = 2
         self.protect_masks, self.mask_margin, self.container_share, self.min_editable_pixels = False, 16, 0.5, 1024
         self.closure_instructions, self.closure_limit, self.confirm_drops, self.soft_gating = False, 3, False, False
+        self.preserve_instructions, self.dag_box, self.edge_policy = False, False, 'full'
 
     def effective_graph(self, dag):
         if self.mode not in ('redag_full', 'flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates'):
             raise ValueError('Unknown environment mode')
         if self.mode in ('redag_full', 'spatial_local'):
-            return dag
+            return strong_edges(dag) if self.edge_policy == 'strong' else dag
         nodes = deepcopy(dag.nodes)
         for parent, child in dag.comp_edges + dag.supp_edges:
             nodes[child].depends_on = sorted(set(nodes[child].depends_on) | {parent})
@@ -88,6 +97,28 @@ class ReDAGHarness:
             chosen.append(nid)
         chosen.sort(key=lambda nid: dag.nodes[nid].weight * (1.0 - state.scores.get(nid, 0.0)), reverse=True)
         return chosen[:self.closure_limit]
+
+    def preserve_requirements(self, state, dag, target_node_id, action):
+        graph = self.effective_graph(dag)
+        anchors = {target_node_id, *condition_parents(graph, target_node_id)}
+        related = anchors | get_dependency_descendants(graph, anchors) | get_int_neighbors(graph, anchors)
+        affected = compute_affected_subgraph(graph, action, target_node_id, state.protected_set)
+        kept = [nid for nid in graph.nodes if nid != target_node_id and nid in affected & state.protected_set & related]
+        rank = {'relation': 0, 'count': 0, 'prohibition': 1, 'attribute': 2, 'entity': 3, 'background': 4}
+        kept.sort(key=lambda nid: (rank.get(graph.nodes[nid].node_type, 5), -graph.nodes[nid].weight))
+        return kept[:self.closure_limit]
+
+    def snapped_box(self, dag, target_node_id, box):
+        node = dag.nodes[target_node_id]
+        owners = [dag.nodes[p].bbox for p in condition_parents(dag, target_node_id) if dag.nodes[p].node_type == 'entity' and dag.nodes[p].bbox is not None]
+        if node.node_type == 'attribute' and owners:
+            support = owners[0]
+        elif node.node_type == 'relation' and len(owners) >= 2:
+            support = (min(b[0] for b in owners), min(b[1] for b in owners), max(b[2] for b in owners), max(b[3] for b in owners))
+        else:
+            return box
+        snapped = expand_bbox_with_margin(support, 1.1)
+        return CANVAS if box_area(snapped) >= WHOLE_CANVAS_SHARE else snapped
 
     def confirm_protected_drops(self, parent_state, dag, target_node_id, action, candidate, scores, affected):
         spatial, gate, limit = compute_spatial_subgraph(dag, action, target_node_id), self.verifier.gate_tau, self.config.max_protected_drop
@@ -148,7 +179,7 @@ class ReDAGHarness:
         self.verifier.two_stage = self.mode not in BASELINE_MODES
         candidate = paste_window_strictly_local(parent_state.image, edited_crop, action.box, self.feather_px, editable)
         if self.mode == 'redag_full':
-            affected = compute_affected_subgraph(dag, action, target_node_id, parent_state.protected_set)
+            affected = compute_affected_subgraph(graph, action, target_node_id, parent_state.protected_set)
         elif self.mode in ('spatial_local', 'spatial_no_gates'):
             affected = compute_spatial_subgraph(dag, action, target_node_id)
         else:
@@ -244,6 +275,14 @@ class ReDAGHarness:
                     sample['closure_nodes'] = self.closure_requirements(state, graph, target_node_id, sample['action'])
                     sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, compose_instruction(
                         sample['action'].instruction, [requirement_statement(graph.nodes[nid]) for nid in sample['closure_nodes']]))
+                if self.dag_box and self.mode == 'redag_full':
+                    sample['controller_box'] = sample['action'].box
+                    sample['action'] = ControllerAction(sample['action'].op, self.snapped_box(graph, target_node_id, sample['action'].box), sample['action'].instruction)
+                if self.preserve_instructions and self.mode == 'redag_full':
+                    sample['preserve_nodes'] = self.preserve_requirements(state, graph, target_node_id, sample['action'])
+                    if sample['preserve_nodes']:
+                        sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, sample['action'].instruction.rstrip() + ' Keep these unchanged: '
+                                                            + '; '.join(requirement_statement(graph.nodes[nid]) for nid in sample['preserve_nodes']) + '.')
                 crop, editable = self.render(editor, state, sample['action'], seed, self.editable_mask(state, graph, target_node_id, sample['action']))
                 try:
                     self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop, editable)
@@ -425,6 +464,9 @@ def add_runtime_arguments(parser):
     parser.add_argument('--closure_instructions', action='store_true')
     parser.add_argument('--confirm_drops', action='store_true')
     parser.add_argument('--soft_gating', action='store_true')
+    parser.add_argument('--preserve_instructions', action='store_true')
+    parser.add_argument('--dag_box', action='store_true')
+    parser.add_argument('--edge_policy', choices=('full', 'strong'), default='full')
     return parser
 
 
@@ -444,8 +486,9 @@ def load_runtime(args, trainable_controller=False, trainable_editor=False):
     grounder = Grounder.from_pretrained(args.detector_model, args.sam_model, verify_device)
     harness = ReDAGHarness(verifier, grounder)
     harness.protect_masks = getattr(args, 'protect_masks', False)
-    for flag in ('closure_instructions', 'confirm_drops', 'soft_gating'):
+    for flag in ('closure_instructions', 'confirm_drops', 'soft_gating', 'preserve_instructions', 'dag_box'):
         setattr(harness, flag, getattr(args, flag, False))
+    harness.edge_policy = getattr(args, 'edge_policy', 'full')
     return harness, controller, editor
 
 
