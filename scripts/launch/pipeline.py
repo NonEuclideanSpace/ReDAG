@@ -61,7 +61,8 @@ def settings():
                 DOWNLOAD_WORKERS=16, RS_PIECES=1)
     for key, default in ints.items():
         s[key] = int(env(key, default))
-    s.update(CKPT_MINUTES=float(env('CKPT_MINUTES', 20)), COST_BUDGET=float(env('COST_BUDGET', 0)), GENERATION_COST=float(env('GENERATION_COST', 1)), RS_LAYOUT=env('RS_LAYOUT', 'shard'), EVAL_LAYOUT=env('EVAL_LAYOUT', 'shard'),
+    s.update(CKPT_MINUTES=float(env('CKPT_MINUTES', 20)), COST_BUDGET=float(env('COST_BUDGET', 0)), GENERATION_COST=float(env('GENERATION_COST', 1)),
+             RS_HARD_MULTIPLIER=int(env('RS_HARD_MULTIPLIER', 1)), RS_LAYOUT=env('RS_LAYOUT', 'shard'), EVAL_LAYOUT=env('EVAL_LAYOUT', 'shard'),
              RL_LAYOUT=env('RL_LAYOUT', 'auto'), EVAL_EDITOR_ARGS=env('EVAL_EDITOR_ARGS', ''),
              EXPERIMENTS=env('EXPERIMENTS', '1 2 3').split(), MB_SPLITS=env('MB_SPLITS', 'dev train').split())
     return s
@@ -199,7 +200,7 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
                              '--adapter', sft / 'planner', '--device', 'cuda:0', '--output', out / 'planner_sft.json'],
         gpus=1, deps=('sft_planner',), hours=0.5, group=g)
     rs_common = [py, 'scripts/collect_controller_rs.py', *runtime, '--editor_adapter', sft / 'editor', '--verifier_device', 'cuda:0',
-                 '--num_denoise_steps', s['STEPS_EVAL']]
+                 '--num_denoise_steps', s['STEPS_EVAL']] + (['--hard_multiplier', s['RS_HARD_MULTIPLIER']] if s['RS_HARD_MULTIPLIER'] > 1 else [])
     if s['RS_LAYOUT'] == 'split':
         add('rs_single', rs_common + ['--device', 'cuda:0', '--editor_device', 'cuda:1', '--data', data / 'controller_rs_states.jsonl',
                                       '--output', data / 'controller_sft.jsonl'], gpus=2, deps=('sft_editor',) + canvases, hours=2.0, group=g)

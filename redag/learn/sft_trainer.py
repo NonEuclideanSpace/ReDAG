@@ -168,7 +168,10 @@ def piece_bounds(costs, piece, pieces):
     return bounds[piece], bounds[piece + 1]
 
 
-def collect_controller_rs(records, harness, controller, editor, output, seed=42, index_offset=0):
+HARD_TARGET_TYPES = ('relation', 'count', 'prohibition')
+
+
+def collect_controller_rs(records, harness, controller, editor, output, seed=42, index_offset=0, group_size=3, hard_multiplier=1):
     import json
     from dataclasses import asdict
     from pathlib import Path
@@ -178,6 +181,7 @@ def collect_controller_rs(records, harness, controller, editor, output, seed=42,
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     images = output.parent / (output.stem + '_images')
+    groups = output.with_suffix('.groups.jsonl')
     selected, done = 0, set()
     if output.exists():  # resume: rows already written are kept; a line cut off by a crash is dropped
         kept = []
@@ -189,7 +193,7 @@ def collect_controller_rs(records, harness, controller, editor, output, seed=42,
                 continue
         output.write_text(''.join(line + '\n' for line in kept), encoding='utf-8')
     from redag.progress import report
-    with output.open('a', encoding='utf-8') as stream:
+    with output.open('a', encoding='utf-8') as stream, groups.open('a', encoding='utf-8') as group_stream:
         for position, record in enumerate(records):
             index = index_offset + position
             report(position, len(records), 'states')
@@ -200,9 +204,14 @@ def collect_controller_rs(records, harness, controller, editor, output, seed=42,
             frontier = harness.active_frontier(dag, state.scores)
             if not frontier:
                 continue
-            candidates = harness.sample_group(state, dag, controller, editor, frontier[0], 3, seed + index * 3)
+            size = group_size * (hard_multiplier if dag.nodes[frontier[0]].node_type in HARD_TARGET_TYPES else 1)
+            candidates = harness.sample_group(state, dag, controller, editor, frontier[0], size, seed + index * group_size * max(1, hard_multiplier))
             if not candidates:  # execution budget exhausted before any candidate was scored
                 continue
+            group_stream.write(json.dumps(dict(id=identifier, target_node_id=frontier[0], target_type=dag.nodes[frontier[0]].node_type,
+                                               candidates=[dict(action=asdict(c['action']), reward=c['reward'], accepted=c['accepted']) for c in candidates]),
+                                          ensure_ascii=False) + '\n')
+            group_stream.flush()
             best = max(candidates, key=lambda c: c['reward'])
             if not best['accepted'] or best['reward'] <= 0:
                 continue
