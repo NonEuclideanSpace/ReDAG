@@ -295,6 +295,22 @@ def test_cost_budget_counts_generations_and_verifier_calls_together():
     assert len(trace) == 3 and harness.last_run['generation_calls'] == 9
 
 
+def test_per_turn_budget_resets_every_conversation_turn():
+    from redag.harness.environment import run_record
+    graph = {'nodes': [{'node_id': 'a', 'node_type': 'entity', 'question': 'a', 'entity_phrase': 'a', 'bbox': [0.1, 0.1, 0.2, 0.2], 'scope': 'local'}]}
+    second = {'nodes': graph['nodes'] + [{'node_id': 'b', 'node_type': 'entity', 'question': 'b', 'entity_phrase': 'b', 'bbox': [0.7, 0.7, 0.8, 0.8], 'scope': 'local'}]}
+    record = {'image': torch.zeros(3, 20, 20), 'turns': [{'user_prompt': 'a', 'graph': graph}, {'user_prompt': 'b', 'graph': second}]}
+    controller = SimpleNamespace(sample=lambda state, dag, target, **kwargs: {'action': ControllerAction('add_entity', dag.nodes[target].bbox, 'Add it.')})
+    editor = SimpleNamespace(render=lambda *args, **kwargs: torch.ones(3, 2, 2))
+    harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.2), None)
+    harness.generation_budget = 2
+    _, _, trace = run_record(record, harness, controller, editor, max_steps=3)
+    assert harness.last_run['generation_calls'] == 2 and [s['turn'] for s in trace] == [0, 0]
+    harness.budget_per_turn = True
+    _, _, trace = run_record(record, harness, controller, editor, max_steps=3)
+    assert harness.last_run['generation_calls'] == 4 and [s['turn'] for s in trace] == [0, 0, 1, 1]
+
+
 @pytest.mark.parametrize('budget', [1, 2])
 def test_local_budget_spent_per_call_and_sibling_grounding_is_restored(budget):
     nodes = {f'n{i}': ConditionNode(f'n{i}', 'entity', f'n{i}', f'n{i}', (0.8, 0.8, 0.9, 0.9) if i else (0.1, 0.1, 0.2, 0.2), scope='local') for i in range(20)}

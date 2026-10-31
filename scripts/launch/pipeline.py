@@ -62,7 +62,7 @@ def settings():
     for key, default in ints.items():
         s[key] = int(env(key, default))
     s.update(CKPT_MINUTES=float(env('CKPT_MINUTES', 20)), COST_BUDGET=float(env('COST_BUDGET', 0)), GENERATION_COST=float(env('GENERATION_COST', 1)),
-             RS_HARD_MULTIPLIER=int(env('RS_HARD_MULTIPLIER', 1)), RS_LAYOUT=env('RS_LAYOUT', 'shard'), EVAL_LAYOUT=env('EVAL_LAYOUT', 'shard'),
+             RS_HARD_MULTIPLIER=int(env('RS_HARD_MULTIPLIER', 1)), BUDGET_PER_TURN=int(env('BUDGET_PER_TURN', 0)), RS_LAYOUT=env('RS_LAYOUT', 'shard'), EVAL_LAYOUT=env('EVAL_LAYOUT', 'shard'),
              RL_LAYOUT=env('RL_LAYOUT', 'auto'), EVAL_EDITOR_ARGS=env('EVAL_EDITOR_ARGS', ''), TRAIN_EDITOR_ARGS=env('TRAIN_EDITOR_ARGS', ''),
              EXPERIMENTS=env('EXPERIMENTS', '1 2 3').split(), MB_SPLITS=env('MB_SPLITS', 'dev train').split())
     return s
@@ -112,7 +112,8 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
     runtime = ['--controller_model', s['CONTROLLER'], '--editor_model', s['EDITOR'], '--verifier_model', s['VERIFIER'],
                '--detector_model', s['DETECTOR'], '--sam_model', s['SAM'], '--planner_model', s['PLANNER']]
     budget = ['--max_steps', s['MAX_STEPS'], '--generation_budget', s['GEN_BUDGET'], '--verification_budget', s['VER_BUDGET'],
-              '--num_denoise_steps', s['STEPS_EVAL']] + (['--cost_budget', s['COST_BUDGET'], '--generation_cost', s['GENERATION_COST']] if s['COST_BUDGET'] else [])
+              '--num_denoise_steps', s['STEPS_EVAL']] + (['--cost_budget', s['COST_BUDGET'], '--generation_cost', s['GENERATION_COST']] if s['COST_BUDGET'] else []) \
+        + (['--budget_per_turn'] if s['BUDGET_PER_TURN'] else [])
     me = [py, str(HERE / 'pipeline.py')]
     jobs = []
 

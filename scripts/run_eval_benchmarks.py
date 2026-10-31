@@ -128,6 +128,7 @@ def main():
     parser.add_argument('--generation_budget', type=int, default=60)
     parser.add_argument('--cost_budget', type=float, default=0.0)
     parser.add_argument('--generation_cost', type=float, default=1.0)
+    parser.add_argument('--budget_per_turn', action='store_true')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--allow-small-dataset', action='store_true')
     parser.add_argument('--exp1_modes', nargs='+', choices=('flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates', 'redag_full'), default=('flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates', 'redag_full'))
@@ -172,7 +173,7 @@ def main():
             if any(stages.get('zero_shot', {}).values()) or any(not all(v.values()) for k, v in stages.items() if k != 'zero_shot') \
                     or len({json.dumps(v, sort_keys=True) for v in stages.values()}) != len(stages):
                 raise ValueError('Zero shot must be base-only and all stage pairs distinct')
-        result = {'exp_id': args.exp_id, 'diagnostic_only': args.allow_small_dataset, 'evaluation_cases': [], 'human_ratings': None, 'human_evaluation_status': 'pending', 'budgets': {'verification': args.verification_budget, 'generation': args.generation_budget, 'cost': args.cost_budget or None, 'generation_cost': args.generation_cost}}
+        result = {'exp_id': args.exp_id, 'diagnostic_only': args.allow_small_dataset, 'evaluation_cases': [], 'human_ratings': None, 'human_evaluation_status': 'pending', 'budgets': {'verification': args.verification_budget, 'generation': args.generation_budget, 'cost': args.cost_budget or None, 'generation_cost': args.generation_cost, 'per_turn': args.budget_per_turn}}
         if partial:
             result['part'] = {'shard': args.shard, 'num_shards': args.num_shards, 'stages': list(stages), 'seed': args.seed}
         if args.exp_id == 2:
@@ -210,7 +211,7 @@ def main():
         mine = [index for index in range(len(records)) if index % args.num_shards == args.shard]
         cache = CaseCache(Path(args.output).with_suffix('.cases.jsonl'), dict(
             exp_id=args.exp_id, data=str(Path(args.data).resolve()), records=len(records), shard=args.shard, num_shards=args.num_shards,
-            stages=stages, modes=modes, seed=args.seed, max_steps=args.max_steps, budgets=[args.verification_budget, args.generation_budget] + ([args.cost_budget, args.generation_cost] if args.cost_budget else []),
+            stages=stages, modes=modes, seed=args.seed, max_steps=args.max_steps, budgets=[args.verification_budget, args.generation_budget] + ([args.cost_budget, args.generation_cost] if args.cost_budget else []) + (['per_turn'] if args.budget_per_turn else []),
             num_denoise_steps=args.num_denoise_steps, models=[args.controller_model, args.editor_model, args.verifier_model,
                                                              args.detector_model, args.sam_model]))
         reusable = reusable_sessions(args.reuse_cases, cache.fingerprint, stages) if args.reuse_cases and args.exp_id == 3 else {}
@@ -225,7 +226,7 @@ def main():
                 if not all(f'credit|{index}' in cache for index in range(len(records))):
                     harness, controller, editor = load_runtime(args)
                     harness.verification_budget, harness.generation_budget = args.verification_budget, args.generation_budget
-                    harness.cost_budget, harness.generation_cost = args.cost_budget or None, args.generation_cost
+                    harness.cost_budget, harness.generation_cost, harness.budget_per_turn = args.cost_budget or None, args.generation_cost, args.budget_per_turn
                 else:
                     harness = controller = editor = None
                 credit_experiment(args, records, harness, controller, editor, planner, result, folder, cache=cache)
@@ -252,7 +253,7 @@ def main():
                                 if runtime is None:  # models are loaded only when a stage still has sessions to run
                                     runtime = load_runtime(args)
                                     runtime[0].verification_budget, runtime[0].generation_budget = args.verification_budget, args.generation_budget
-                                    runtime[0].cost_budget, runtime[0].generation_cost = args.cost_budget or None, args.generation_cost
+                                    runtime[0].cost_budget, runtime[0].generation_cost, runtime[0].budget_per_turn = args.cost_budget or None, args.generation_cost, args.budget_per_turn
                                 harness, controller, editor = runtime
                                 harness.mode = mode
                                 state, dag, trace = run_record(record, harness, controller, editor, args.max_steps, args.seed + seed, planner=planner)
