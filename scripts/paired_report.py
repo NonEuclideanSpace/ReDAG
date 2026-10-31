@@ -42,7 +42,7 @@ def compare(a, b):
     return '%.2f vs %.2f (better %d worse %d p %.3f)' % (mean(a), mean(b), wins, losses, sign_p(wins, losses))
 
 
-def load_sessions(paths, skip):
+def load_sessions(paths, skip, parents):
     sessions, components = {}, Counter()
     for path in paths:
         name = Path(path).name
@@ -55,11 +55,15 @@ def load_sessions(paths, skip):
                 continue
             _, mode, index, seed = row['key'].split('|')
             label, case = run_label(name, mode), row['case']
-            damage = 0
+            damage = consistent = 0
             for step in case['steps']:
                 nodes = case['views'][step['candidate']]['nodes']
                 scores = {r['node_id']: step_score(r) for r in step['stage_scores']}
                 damage += sum(1 for v in step['protected'] if v in scores and scores[v] < nodes[v]['threshold'])
+                if step['accepted']:
+                    held = set(step['protected']) | {v for v, q in scores.items() if v in nodes and q >= nodes[v]['threshold']}
+                    held -= {v for v in step['protected'] if v in scores and scores[v] < nodes[v]['threshold']}
+                    consistent += all(p in held for p in parents[int(index)].get(step['target'], ()) if p in nodes)
                 closure, refuted = step.get('closure_nodes', []), step.get('refuted_drops', [])
                 if closure or refuted:
                     components[label, 'steps_with_closure'] += bool(closure)
@@ -69,7 +73,7 @@ def load_sessions(paths, skip):
                     components[label, 'steps_with_refuted_drop'] += bool(refuted)
                     components[label, 'acceptances_rescued_by_confirmation'] += bool(refuted) and step['accepted']
             execution = case.get('execution', {})
-            sessions[label, int(index), int(seed)] = dict(k=len(case['views'][case['final']]['nodes']), accepted=sum(s['accepted'] for s in case['steps']),
+            sessions[label, int(index), int(seed)] = dict(k=len(case['views'][case['final']]['nodes']), accepted=sum(s['accepted'] for s in case['steps']), consistent=consistent,
                                                           damage=damage, verifier=execution.get('verifier_calls') or 0, stop=execution.get('stop_reason'))
     return sessions, components
 
@@ -85,11 +89,11 @@ def main():
     records = [json.loads(line) for line in open(args.data, encoding='utf-8')]
     parents = [dependency_parents(r) for r in records]
     turns, edges = [len(r['turns']) for r in records], [sum(len(p) for p in ps.values()) for ps in parents]
-    sessions, components = load_sessions(sorted(glob.glob(str(Path(args.eval_dir) / 'exp1*.cases.jsonl'))), args.skip)
+    sessions, components = load_sessions(sorted(glob.glob(str(Path(args.eval_dir) / 'exp1*.cases.jsonl'))), args.skip, parents)
     labels = sorted({label for label, _, _ in sessions})
     for label in labels:
         rows = [v for (l, _, _), v in sessions.items() if l == label]
-        print('RUN %-28s n %3d accepted %.2f damage %.2f verifier %.1f stops %s' % (label, len(rows), mean([r['accepted'] for r in rows]),
+        print('RUN %-28s n %3d accepted %.2f consistent %.2f damage %.2f verifier %.1f stops %s' % (label, len(rows), mean([r['accepted'] for r in rows]), mean([r['consistent'] for r in rows]),
               mean([r['damage'] for r in rows]), mean([r['verifier'] for r in rows]), dict(Counter(r['stop'] for r in rows))))
     for (label, key), value in sorted(components.items()):
         print('COMPONENT %s %s %d' % (label, key, value))
@@ -101,7 +105,8 @@ def main():
         if not keys:
             continue
         get = lambda label, field, ks: [sessions[label, i, s][field] for i, s in ks]
-        print('PAIR %s vs %s n %d accepted %s damage %.2f vs %.2f verifier %.1f vs %.1f' % (base, other, len(keys), compare(get(base, 'accepted', keys), get(other, 'accepted', keys)),
+        print('PAIR %s vs %s n %d accepted %s consistent %s damage %.2f vs %.2f verifier %.1f vs %.1f' % (base, other, len(keys), compare(get(base, 'accepted', keys), get(other, 'accepted', keys)),
+              compare(get(base, 'consistent', keys), get(other, 'consistent', keys)),
               mean(get(base, 'damage', keys)), mean(get(other, 'damage', keys)), mean(get(base, 'verifier', keys)), mean(get(other, 'verifier', keys))))
         subsets = [('K=%d' % k, lambda i, s, k=k: sessions[base, i, s]['k'] == k) for k in (10, 20, 30)]
         subsets += [('turns<=2', lambda i, s: turns[i] <= 2), ('turns>=3', lambda i, s: turns[i] >= 3),
@@ -110,7 +115,8 @@ def main():
         for tag, test in subsets:
             subset = [(i, s) for i, s in keys if test(i, s)]
             if subset:
-                print('    %-11s n %3d accepted %s' % (tag, len(subset), compare(get(base, 'accepted', subset), get(other, 'accepted', subset))))
+                print('    %-11s n %3d accepted %s consistent %s' % (tag, len(subset), compare(get(base, 'accepted', subset), get(other, 'accepted', subset)),
+                      compare(get(base, 'consistent', subset), get(other, 'consistent', subset))))
     judged = {}
     for path in args.judges:
         for line in open(path, encoding='utf-8'):
