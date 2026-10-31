@@ -6,7 +6,7 @@ from redag.config import ReDAGConfig
 from redag.graph.schema import CanvasState, ConditionDAG, ControllerAction
 from redag.graph.dag import (CANVAS, compute_active_frontier, compute_affected_subgraph, compute_spatial_subgraph, condition_parents, edit_footprint,
                              get_dependency_descendants, get_int_neighbors)
-from redag.edit.compositor import check_local_acceptance, paste_window_strictly_local
+from redag.edit.compositor import check_local_acceptance, defnorm_box_to_pixel_slice, paste_window_strictly_local
 from redag.learn.credit import compute_subgraph_reward
 
 BASELINE_MODES = ('flat_full', 'tree_rollback_only')
@@ -24,7 +24,7 @@ class ReDAGHarness:
         self.verification_budget = self.generation_budget = self.render_limit = None
         self.generation_counter, self.last_run, self.unknown_nodes = 0, {}, set()
         self.retry_limit = 2
-        self.protect_masks, self.mask_margin = False, 16
+        self.protect_masks, self.mask_margin, self.container_share, self.min_editable = False, 16, 0.5, 0.2
 
     def effective_graph(self, dag):
         if self.mode not in ('redag_full', 'flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates'):
@@ -92,7 +92,7 @@ class ReDAGHarness:
             stage_scores=self.verifier.records[start:], verifier_calls=self.verifier.call_counter - calls)
         return state, reward, accepted, affected
 
-    def editable_mask(self, state, dag, target_node_id):
+    def editable_mask(self, state, dag, target_node_id, action):
         if not self.protect_masks or self.grounder is None or self.mode != 'redag_full':
             return None
         target = dag.nodes[target_node_id]
@@ -100,18 +100,25 @@ class ReDAGHarness:
         free = closure | get_int_neighbors(dag, closure)
         if target.node_type in ('count', 'prohibition'):
             free |= {nid for nid, node in dag.nodes.items() if node.entity_phrase == target.entity_phrase}
+        checked = (state.protected_set & compute_affected_subgraph(dag, action, target_node_id, state.protected_set)) - free
         keep = set()
-        for nid in state.protected_set - free:
+        for nid in checked:
             if dag.nodes[nid].node_type == 'entity':
                 keep.add(nid)
             elif dag.nodes[nid].node_type == 'attribute':
                 keep.update(p for p in condition_parents(dag, nid) if dag.nodes[p].node_type == 'entity' and p not in free)
+        height, width = state.image.shape[-2:]
+        x1, y1, x2, y2 = defnorm_box_to_pixel_slice(action.box, height, width)
         layers = [self.grounder.masks[nid].to(state.image.device).float() for nid in sorted(keep) if nid in self.grounder.masks]
+        layers = [layer for layer in layers if layer[y1:y2, x1:x2].mean() <= self.container_share]
         if not layers:
             return None
         margin = self.mask_margin
         union = F.max_pool2d(torch.stack(layers).amax(0)[None, None], kernel_size=2 * margin + 1, stride=1, padding=margin)[0, 0]
-        return 1 - union
+        editable = 1 - union
+        if editable[y1:y2, x1:x2].mean() < self.min_editable:
+            return None
+        return editable
 
     def render(self, editor, state, action, seed, mask):
         if mask is not None:
@@ -123,7 +130,6 @@ class ReDAGHarness:
 
     def sample_group(self, state, dag, controller, editor, target_node_id, group_size=6, seed=42):
         candidates, grounding = [], self.grounding_state()
-        mask = self.editable_mask(state, dag, target_node_id)
         try:
             for index in range(group_size):
                 if self.render_limit is not None and self.generation_counter >= self.render_limit:
@@ -139,7 +145,7 @@ class ReDAGHarness:
                 # different noise across groups, steps and evaluation seeds
                 if self.mode in BASELINE_MODES:
                     sample['action'] = ControllerAction(sample['action'].op, CANVAS, sample['action'].instruction)
-                crop = self.render(editor, state, sample['action'], seed, mask)
+                crop = self.render(editor, state, sample['action'], seed, self.editable_mask(state, graph, target_node_id, sample['action']))
                 try:
                     self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop)
                 except RuntimeError as error:
