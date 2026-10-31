@@ -4,12 +4,32 @@ import torch
 import torch.nn.functional as F
 from redag.config import ReDAGConfig
 from redag.graph.schema import CanvasState, ConditionDAG, ControllerAction
-from redag.graph.dag import (CANVAS, compute_active_frontier, compute_affected_subgraph, compute_spatial_subgraph, condition_parents, edit_footprint,
-                             get_dependency_descendants, get_int_neighbors)
+from redag.graph.dag import (CANVAS, MIN_FOOTPRINT_OVERLAP, compute_active_frontier, compute_affected_subgraph, compute_spatial_subgraph, condition_parents,
+                             edit_footprint, footprint_overlap, get_dependency_descendants, get_int_neighbors, semantic_support, topological_nodes)
 from redag.edit.compositor import check_local_acceptance, defnorm_box_to_pixel_slice, paste_window_strictly_local
 from redag.learn.credit import compute_subgraph_reward
+from redag.verify.verifier import expand_bbox_with_margin
 
 BASELINE_MODES = ('flat_full', 'tree_rollback_only')
+
+
+def requirement_statement(node):
+    text, phrase = node.question.strip().rstrip('?').strip(), node.entity_phrase.strip()
+    lower = text.lower()
+    for prefix, lead in (('is there ', 'there is '), ('are there ', 'there are ')):
+        if lower.startswith(prefix):
+            return lead + text[len(prefix):]
+    for prefix, verb in (('is the ', 'is'), ('are the ', 'are'), ('does the ', 'has')):
+        head = prefix + phrase.lower() + (' have ' if prefix == 'does the ' else ' ')
+        if phrase and lower.startswith(head):
+            return f'the {phrase} {verb} {text[len(head):]}'
+    return f'the answer to "{node.question.strip()}" is yes'
+
+
+def compose_instruction(instruction, statements):
+    if not statements:
+        return instruction
+    return instruction.rstrip() + ' In the same edit, also make sure that ' + '; '.join(statements) + '.'
 
 
 class ReDAGHarness:
@@ -26,6 +46,7 @@ class ReDAGHarness:
         self.generation_counter, self.last_run, self.unknown_nodes = 0, {}, set()
         self.retry_limit = 2
         self.protect_masks, self.mask_margin, self.container_share, self.min_editable_pixels = False, 16, 0.5, 1024
+        self.closure_instructions, self.closure_limit, self.confirm_drops, self.soft_gating = False, 3, False, False
 
     def effective_graph(self, dag):
         if self.mode not in ('redag_full', 'flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates'):
@@ -38,7 +59,62 @@ class ReDAGHarness:
         return ConditionDAG(nodes)
 
     def active_frontier(self, dag, scores):
-        return compute_active_frontier(self.effective_graph(dag), scores, self.config.gate_tau, gated=self.mode in ('redag_full', 'spatial_local'))
+        graph, gated = self.effective_graph(dag), self.mode in ('redag_full', 'spatial_local')
+        ready = compute_active_frontier(graph, scores, self.config.gate_tau, gated=gated)
+        if not gated or not self.soft_gating:
+            return ready
+        return ready + [nid for nid in compute_active_frontier(graph, scores, self.config.gate_tau, gated=False) if nid not in ready
+                        and all(scores.get(p, 0.0) >= self.config.gate_tau for p in condition_parents(graph, nid) if graph.nodes[p].node_type == 'entity')]
+
+    def closure_requirements(self, state, dag, target_node_id, action):
+        target = dag.nodes[target_node_id]
+        if target.node_type == 'entity':
+            anchors = {target_node_id}
+        elif target.node_type == 'attribute':
+            anchors = {p for p in condition_parents(dag, target_node_id) if dag.nodes[p].node_type == 'entity'}
+        else:
+            return []
+        satisfied = {nid for nid, score in state.scores.items() if score >= dag.nodes[nid].threshold}
+        chosen = []
+        for nid, node in dag.nodes.items():
+            if nid == target_node_id or nid in satisfied or node.node_type not in ('attribute', 'relation'):
+                continue
+            parents = set(condition_parents(dag, nid))
+            if not parents & anchors or not parents <= satisfied | anchors | {target_node_id}:
+                continue
+            support = edit_footprint(dag, nid) if node.node_type == 'attribute' else semantic_support(dag, nid)
+            if support is not None and footprint_overlap(support, action.box) < MIN_FOOTPRINT_OVERLAP:
+                continue
+            chosen.append(nid)
+        chosen.sort(key=lambda nid: dag.nodes[nid].weight * (1.0 - state.scores.get(nid, 0.0)), reverse=True)
+        return chosen[:self.closure_limit]
+
+    def confirm_protected_drops(self, parent_state, dag, target_node_id, action, candidate, scores, affected):
+        spatial, gate, limit = compute_spatial_subgraph(dag, action, target_node_id), self.verifier.gate_tau, self.config.max_protected_drop
+        parents = {nid: [p for p, c in dag.comp_edges if c == nid] for nid in dag.nodes}
+        gated = {nid for nid in affected if any(scores[p] < gate for p in parents[nid])}
+        scores, refuted = dict(scores), []
+        height, width = candidate.shape[-2:]
+        for nid in topological_nodes(dag):
+            if nid not in affected or nid == target_node_id:
+                continue
+            node = dag.nodes[nid]
+            if nid in gated and any(p in refuted for p in parents[nid]) and all(scores[p] >= gate for p in parents[nid]):
+                scores[nid] = self.verifier.verify_single_node_two_stage(candidate, node, dag)
+            if nid in spatial or nid not in parent_state.protected_set or scores[nid] - parent_state.scores[nid] >= -limit:
+                continue
+            if any(scores[p] < gate for p in parents[nid]):
+                continue
+            support = semantic_support(dag, nid)
+            if support is None:
+                continue
+            x1, y1, x2, y2 = defnorm_box_to_pixel_slice(expand_bbox_with_margin(support, 1.2), height, width)
+            before, after = parent_state.image[:, y1:y2, x1:x2], candidate[:, y1:y2, x1:x2]
+            if not torch.equal(before, after) and self.verifier.score(before, node.question) - self.verifier.score(after, node.question) > limit:
+                continue
+            scores[nid] = parent_state.scores[nid]
+            refuted.append(nid)
+        return scores, refuted
 
     def grounding_state(self):
         return (dict(self.grounder.counts), dict(self.grounder.masks)) if self.grounder else None
@@ -79,6 +155,10 @@ class ReDAGHarness:
             affected = set(graph.nodes)
         uncertain = {n for n, node in dag.nodes.items() if node.node_type in ('entity', 'attribute') and edit_footprint(dag, n) is None}
         raw_scores = self.verifier.verify_subgraph_after_edit(candidate, graph, parent_state.scores, affected)
+        refuted = []
+        target_gain = raw_scores[target_node_id] - parent_state.scores[target_node_id]
+        if self.confirm_drops and self.mode == 'redag_full' and (target_gain >= self.config.min_target_gain or raw_scores[target_node_id] >= dag.nodes[target_node_id].threshold):
+            raw_scores, refuted = self.confirm_protected_drops(parent_state, graph, target_node_id, action, candidate, raw_scores, affected)
         accepted = check_local_acceptance(graph, target_node_id, parent_state.scores, raw_scores, parent_state.protected_set, affected,
                                          self.config.min_target_gain, self.config.max_protected_drop)
         delivered_image = candidate if accepted else parent_state.image
@@ -89,7 +169,7 @@ class ReDAGHarness:
         self.last_candidate = dict(dag=deepcopy(dag), parent_state=parent_state,
             candidate_state=CanvasState(candidate, raw_scores, {n for n in raw_scores if raw_scores[n] >= dag.nodes[n].threshold}),
             delivered_state=state, raw_scores=raw_scores, affected=affected, target_node_id=target_node_id, action=action,
-            accepted=accepted, reward=reward, coverage_uncertain_nodes=sorted(uncertain),
+            accepted=accepted, reward=reward, coverage_uncertain_nodes=sorted(uncertain), refuted_drops=refuted,
             stage_scores=self.verifier.records[start:], verifier_calls=self.verifier.call_counter - calls)
         return state, reward, accepted, affected
 
@@ -160,6 +240,10 @@ class ReDAGHarness:
                 # different noise across groups, steps and evaluation seeds
                 if self.mode in BASELINE_MODES:
                     sample['action'] = ControllerAction(sample['action'].op, CANVAS, sample['action'].instruction)
+                if self.closure_instructions and self.mode == 'redag_full':
+                    sample['closure_nodes'] = self.closure_requirements(state, graph, target_node_id, sample['action'])
+                    sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, compose_instruction(
+                        sample['action'].instruction, [requirement_statement(graph.nodes[nid]) for nid in sample['closure_nodes']]))
                 crop, editable = self.render(editor, state, sample['action'], seed, self.editable_mask(state, graph, target_node_id, sample['action']))
                 try:
                     self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop, editable)
@@ -338,6 +422,9 @@ def add_runtime_arguments(parser):
     parser.add_argument('--num_denoise_steps', type=int, help='editor sampling steps (default: config value, 50)')
     parser.add_argument('--editor_work_side', type=int, default=0)
     parser.add_argument('--protect_masks', action='store_true')
+    parser.add_argument('--closure_instructions', action='store_true')
+    parser.add_argument('--confirm_drops', action='store_true')
+    parser.add_argument('--soft_gating', action='store_true')
     return parser
 
 
@@ -357,6 +444,8 @@ def load_runtime(args, trainable_controller=False, trainable_editor=False):
     grounder = Grounder.from_pretrained(args.detector_model, args.sam_model, verify_device)
     harness = ReDAGHarness(verifier, grounder)
     harness.protect_masks = getattr(args, 'protect_masks', False)
+    for flag in ('closure_instructions', 'confirm_drops', 'soft_gating'):
+        setattr(harness, flag, getattr(args, flag, False))
     return harness, controller, editor
 
 

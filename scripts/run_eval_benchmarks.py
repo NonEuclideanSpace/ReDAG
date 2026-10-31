@@ -114,6 +114,10 @@ def export_case(state, dag, trace, folder, identifier, group, budget, config):
             delivered = export_view(returned.image, graph, folder, f'{identifier}_{index}_delivered')
             views[delivered['id']] = delivered
         steps.append({'delivered': delivered['id'], 'before': before['id'], 'candidate': candidate['id'], 'target': step['target_node_id'], 'protected': sorted(step['parent_state'].protected_set), 'accepted': step['accepted'], 'stage_scores': step['stage_scores'], 'affected': sorted(step['affected']), 'coverage_uncertain_nodes': step.get('coverage_uncertain_nodes', [])})
+        if step.get('refuted_drops'):
+            steps[-1]['refuted_drops'] = list(step['refuted_drops'])
+        if step.get('sample', {}).get('closure_nodes'):
+            steps[-1].update(closure_nodes=list(step['sample']['closure_nodes']), instruction=step['action'].instruction)
     return {'id': identifier, 'group': group, 'views': views, 'final': final['id'], 'steps': steps, 'execution': dict(budget), 'min_gain': config.min_target_gain, 'max_drop': config.max_protected_drop}
 
 
@@ -209,13 +213,17 @@ def main():
         modes = tuple(args.exp1_modes) if args.exp_id == 1 else ('redag_full',)
         seeds = tuple(range(3)) if args.exp_id == 3 else (0,)
         mine = [index for index in range(len(records)) if index % args.num_shards == args.shard]
-        cache = CaseCache(Path(args.output).with_suffix('.cases.jsonl'), dict(
+        fingerprint = dict(
             exp_id=args.exp_id, data=str(Path(args.data).resolve()), records=len(records), shard=args.shard, num_shards=args.num_shards,
             stages=stages, modes=modes, seed=args.seed, max_steps=args.max_steps, budgets=[args.verification_budget, args.generation_budget] + ([args.cost_budget, args.generation_cost] if args.cost_budget else []) + (['per_turn'] if args.budget_per_turn else []),
             num_denoise_steps=args.num_denoise_steps, models=[args.controller_model, args.editor_model, args.verifier_model,
-                                                             args.detector_model, args.sam_model]))
+                                                             args.detector_model, args.sam_model])
+        variant = [flag for flag in ('closure_instructions', 'confirm_drops', 'soft_gating') if getattr(args, flag, False)]
+        if variant:
+            fingerprint['variant'] = variant
+        cache = CaseCache(Path(args.output).with_suffix('.cases.jsonl'), fingerprint)
         reusable = reusable_sessions(args.reuse_cases, cache.fingerprint, stages) if args.reuse_cases and args.exp_id == 3 else {}
-        provenance = dict(code=code_revision(), editor=[args.editor_work_side or 0, bool(args.protect_masks)])
+        provenance = dict(code=code_revision(), editor=[args.editor_work_side or 0, bool(args.protect_masks)], **({'variant': variant} if variant else {}))
         work = [(stage, mode, index, seed) for stage in stages for mode in modes for index in mine for seed in seeds]
         done_count = sum(f'{stage}|{mode}|{index}|{seed}' in cache for stage, mode, index, seed in work)
         if done_count:
