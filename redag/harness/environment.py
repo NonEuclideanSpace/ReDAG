@@ -34,6 +34,18 @@ def strong_edges(dag):
     return ConditionDAG(nodes, comp_edges=comp)
 
 
+def preserved_phrases(dag, node_ids, target_phrase, limit=3):
+    phrases = []
+    for nid in node_ids:
+        node = dag.nodes[nid]
+        candidates = [node.entity_phrase] + [dag.nodes[p].entity_phrase for p in condition_parents(dag, nid) if dag.nodes[p].node_type == 'entity']
+        for phrase in candidates:
+            phrase = phrase.strip()
+            if phrase and phrase.lower() != target_phrase.strip().lower() and phrase.lower() not in [q.lower() for q in phrases]:
+                phrases.append(phrase)
+    return phrases[:limit]
+
+
 def compose_instruction(instruction, statements):
     if not statements:
         return instruction
@@ -280,9 +292,9 @@ class ReDAGHarness:
                     sample['action'] = ControllerAction(sample['action'].op, self.snapped_box(graph, target_node_id, sample['action'].box), sample['action'].instruction)
                 if self.preserve_instructions and self.mode == 'redag_full':
                     sample['preserve_nodes'] = self.preserve_requirements(state, graph, target_node_id, sample['action'])
-                    if sample['preserve_nodes']:
-                        sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, sample['action'].instruction.rstrip() + ' Keep these unchanged: '
-                                                            + '; '.join(requirement_statement(graph.nodes[nid]) for nid in sample['preserve_nodes']) + '.')
+                    phrases = preserved_phrases(graph, sample['preserve_nodes'], graph.nodes[target_node_id].entity_phrase)
+                    if phrases:
+                        sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, sample['action'].instruction.rstrip() + ' Keep the ' + ' and the '.join(phrases) + ' unchanged.')
                 crop, editable = self.render(editor, state, sample['action'], seed, self.editable_mask(state, graph, target_node_id, sample['action']))
                 try:
                     self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop, editable)

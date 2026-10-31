@@ -527,5 +527,7 @@ def test_preservation_instructions_and_snapped_boxes_follow_the_graph():
     editor = SimpleNamespace(render=lambda image, action, seed: seen.append(action) or torch.ones(3, 4, 4))
     harness.preserve_instructions, harness.dag_box = True, True
     candidates = harness.sample_group(state, dag, controller, editor, 'red', group_size=1)
-    assert seen[0].instruction == 'Make it red. Keep these unchanged: the cup is on the table; there is a cup.' or seen[0].instruction.startswith('Make it red. Keep these unchanged: the cup is on the table')
+    assert seen[0].instruction == 'Make it red. Keep the table unchanged.'
     assert candidates[0]['sample']['preserve_nodes'] == ['on', 'cup'] and seen[0].box == pytest.approx((0.09, 0.09, 0.31, 0.31))
+    from redag.harness.environment import preserved_phrases
+    assert preserved_phrases(dag, ['on', 'near', 'cup'], 'dog') == ['cup', 'table', 'plate']
