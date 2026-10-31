@@ -405,3 +405,84 @@ def test_local_windows_render_at_a_working_resolution_with_context(monkeypatch):
     assert crop.shape == (3, 24, 24) and torch.allclose(crop, torch.full_like(crop, 0.5)) and seen['mask_latent'].shape == (1, 1, 9, 9)
     whole = ControllerAction('modify_attr', (0.0, 0.0, 1.0, 1.0), 'Change it.')
     assert editor._geometry(image, whole) == ((0, 0, 96, 96), (0, 0, 96, 96), (384, 384))
+
+
+def test_requirement_statements_turn_questions_into_targets():
+    from redag.harness.environment import requirement_statement
+    def node(question, phrase):
+        return ConditionNode('n', 'attribute', question, phrase)
+    assert requirement_statement(node('Is there a cup in the image?', 'cup')) == 'there is a cup in the image'
+    assert requirement_statement(node('Is the cup red?', 'cup')) == 'the cup is red'
+    assert requirement_statement(node('Are the apples green?', 'apples')) == 'the apples are green'
+    assert requirement_statement(node('Does the cup have a handle?', 'cup')) == 'the cup has a handle'
+    assert requirement_statement(node('Is it sunny?', 'sky')) == 'the answer to "Is it sunny?" is yes'
+
+
+def test_closure_instructions_fold_pending_children_into_the_entity_edit():
+    nodes = {'cup': ConditionNode('cup', 'entity', 'Is there a cup in the image?', 'cup', (0.1, 0.1, 0.4, 0.4), scope='local'),
+             'red': ConditionNode('red', 'attribute', 'Is the cup red?', 'cup', scope='local'),
+             'handle': ConditionNode('handle', 'attribute', 'Does the cup have a handle?', 'cup', scope='local'),
+             'on': ConditionNode('on', 'relation', 'Is the cup on the table?', 'cup', (0.0, 0.1, 1.0, 1.0), scope='local', depends_on=['cup', 'table']),
+             'table': ConditionNode('table', 'entity', 'Is there a table?', 'table', (0.0, 0.3, 1.0, 1.0), scope='local'),
+             'dog': ConditionNode('dog', 'entity', 'Is there a dog?', 'dog', (0.6, 0.6, 0.9, 0.9), scope='local'),
+             'brown': ConditionNode('brown', 'attribute', 'Is the dog brown?', 'dog', scope='local'),
+             'sky': ConditionNode('sky', 'background', 'Is the sky blue?', 'sky', scope='global')}
+    dag = ConditionDAG(nodes, comp_edges=[('cup', 'red'), ('cup', 'handle'), ('dog', 'brown')])
+    scores = {'cup': 0.1, 'red': 0.1, 'handle': 0.2, 'on': 0.1, 'table': 0.9, 'dog': 0.9, 'brown': 0.1, 'sky': 0.1}
+    state = CanvasState(torch.zeros(3, 20, 20), scores, {'table', 'dog'})
+    seen = []
+    controller = SimpleNamespace(sample=lambda state, graph, target, **kwargs: {'action': ControllerAction('add_entity', (0.1, 0.1, 0.4, 0.4), 'Add a cup.')})
+    editor = SimpleNamespace(render=lambda image, action, seed: seen.append(action.instruction) or torch.ones(3, 6, 6))
+    harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.2), None)
+    harness.sample_group(state, dag, controller, editor, 'cup', group_size=1)
+    harness.closure_instructions, harness.closure_limit = True, 2
+    candidates = harness.sample_group(state, dag, controller, editor, 'cup', group_size=1)
+    assert seen[0] == 'Add a cup.' and candidates[0]['sample']['closure_nodes'] == ['red', 'on']
+    assert seen[1] == 'Add a cup. In the same edit, also make sure that the cup is red; the cup is on the table.'
+    harness.closure_limit = 3
+    assert harness.closure_requirements(state, dag, 'cup', candidates[0]['action']) == ['red', 'on', 'handle']
+    assert harness.closure_requirements(state, dag, 'brown', ControllerAction('modify_attr', (0.6, 0.6, 0.9, 0.9), 'x')) == []
+    assert harness.closure_requirements(state, dag, 'cup', ControllerAction('add_entity', (0.7, 0.0, 1.0, 0.2), 'x')) == ['on']
+    harness.mode = 'spatial_no_gates'
+    harness.sample_group(state, dag, controller, editor, 'cup', group_size=1)
+    assert seen[2] == 'Add a cup.'
+
+
+@pytest.mark.parametrize('box,confirm,accepted,refuted', [((0.7, 0.7, 0.9, 0.9), False, False, []), ((0.7, 0.7, 0.9, 0.9), True, True, ['cup']),
+                                                          ((0.5, 0.1, 0.9, 0.5), True, False, [])])
+def test_confirm_drops_restores_untouched_remote_conditions_only(box, confirm, accepted, refuted):
+    nodes = {'ball': ConditionNode('ball', 'entity', 'ball', 'ball', box, scope='local'),
+             'cup': ConditionNode('cup', 'entity', 'cup', 'cup', (0.1, 0.1, 0.5, 0.5), scope='local'),
+             'red': ConditionNode('red', 'attribute', 'red', 'cup', scope='local')}
+    dag = ConditionDAG(nodes, comp_edges=[('cup', 'red')], int_edges=[('ball', 'cup')])
+    parent = CanvasState(torch.zeros(3, 20, 20), {'ball': 0.1, 'cup': 0.95, 'red': 0.9}, {'cup', 'red'})
+    calls = []
+    def score(image, question):
+        calls.append(question)
+        if question == 'cup':
+            return 0.3 if box[0] > 0.6 else 0.2 if bool((image[0] > 0.5).any()) else 0.95
+        return 0.9
+    harness = ReDAGHarness(TwoStageVerifier(score), None, feather_px=0)
+    harness.confirm_drops = confirm
+    action = ControllerAction('add_entity', box, 'Add a red ball.')
+    delivered, _, ok, affected = harness.evaluate_candidate_action(parent, dag, 'ball', action, torch.tensor([1., 0., 0.])[:, None, None].expand(3, 8, 8))
+    assert affected == {'ball', 'cup', 'red'} and ok is accepted and harness.last_candidate['refuted_drops'] == refuted
+    if accepted:
+        assert delivered.scores == {'ball': 0.9, 'cup': 0.95, 'red': 0.9} and calls.count('red') == 1
+    if box[0] < 0.6:
+        assert harness.last_candidate['raw_scores']['cup'] == 0.2 and harness.last_candidate['raw_scores']['red'] == 0.0
+
+
+def test_soft_gating_only_waits_for_entity_presence():
+    nodes = {'cup': ConditionNode('cup', 'entity', 'cup', 'cup'), 'red': ConditionNode('red', 'attribute', 'red', 'cup'),
+             'shiny': ConditionNode('shiny', 'attribute', 'shiny', 'cup', depends_on=['red']),
+             'bowl': ConditionNode('bowl', 'entity', 'bowl', 'bowl'), 'blue': ConditionNode('blue', 'attribute', 'blue', 'bowl', depends_on=['bowl'])}
+    dag = ConditionDAG(nodes, comp_edges=[('cup', 'red')])
+    scores = {'cup': 0.9, 'red': 0.1, 'shiny': 0.1, 'bowl': 0.1, 'blue': 0.1}
+    harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.5), None)
+    assert sorted(harness.active_frontier(dag, scores)) == ['bowl', 'red']
+    harness.soft_gating = True
+    frontier = harness.active_frontier(dag, scores)
+    assert sorted(frontier[:2]) == ['bowl', 'red'] and frontier[2:] == ['shiny']
+    harness.mode = 'spatial_no_gates'
+    assert sorted(harness.active_frontier(dag, scores)) == ['blue', 'bowl', 'red', 'shiny']
