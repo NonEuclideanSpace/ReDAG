@@ -401,7 +401,8 @@ class Scheduler:
 
     def free_gpus(self):
         held = {g for r in self.running.values() for g in r['gpus']}
-        return [g for g in self.gpu_list() if g not in held and g not in self.foreign]
+        busy = {g['index'] for g in self.gpu_info if self.gpu_free_mib is not None and g['used'] > self.gpu_free_mib}
+        return [g for g in self.gpu_list() if g not in held and g not in busy]
 
     # ---------------------------------------------------------------- estimates
     def estimates(self, now=None):
