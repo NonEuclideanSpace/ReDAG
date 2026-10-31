@@ -30,7 +30,7 @@ def strong_edges(dag):
     nodes = deepcopy(dag.nodes)
     for node in nodes.values():
         node.depends_on = [p for p in node.depends_on if node.node_type in ('attribute', 'relation', 'count') and dag.nodes[p].node_type == 'entity']
-    comp = [(p, c) for p, c in dag.comp_edges if dag.nodes[p].node_type == 'entity' and dag.nodes[c].node_type == 'attribute']
+    comp = [(p, c) for p, c in dag.comp_edges if dag.nodes[p].node_type == 'entity' and dag.nodes[c].node_type in ('attribute', 'relation', 'count')]
     return ConditionDAG(nodes, comp_edges=comp)
 
 

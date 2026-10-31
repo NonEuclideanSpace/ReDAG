@@ -494,9 +494,9 @@ def test_strong_edges_keep_entity_dependencies_and_drop_weak_links():
     nodes = {'cup': ConditionNode('cup', 'entity', 'cup', 'cup'), 'table': ConditionNode('table', 'entity', 'table', 'table'),
              'red': ConditionNode('red', 'attribute', 'red', 'cup'), 'on': ConditionNode('on', 'relation', 'on', 'cup', depends_on=['cup', 'table']),
              'shiny': ConditionNode('shiny', 'attribute', 'shiny', 'cup', depends_on=['red']), 'sky': ConditionNode('sky', 'background', 'sky', 'sky', depends_on=['table'])}
-    dag = ConditionDAG(nodes, comp_edges=[('cup', 'red'), ('red', 'shiny')], supp_edges=[('table', 'cup')], int_edges=[('cup', 'table')])
+    dag = ConditionDAG(nodes, comp_edges=[('cup', 'red'), ('red', 'shiny'), ('table', 'on')], supp_edges=[('table', 'cup')], int_edges=[('cup', 'table')])
     strong = strong_edges(dag)
-    assert strong.comp_edges == [('cup', 'red')] and not strong.supp_edges and not strong.int_edges
+    assert strong.comp_edges == [('cup', 'red'), ('table', 'on')] and not strong.supp_edges and not strong.int_edges
     assert strong.nodes['on'].depends_on == ['cup', 'table'] and strong.nodes['shiny'].depends_on == [] and strong.nodes['sky'].depends_on == []
     assert dag.nodes['shiny'].depends_on == ['red']
     harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.5), None)
