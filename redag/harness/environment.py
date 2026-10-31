@@ -274,6 +274,7 @@ def add_runtime_arguments(parser):
     parser.add_argument('--planner_adapter')
     parser.add_argument('--planner_device')
     parser.add_argument('--num_denoise_steps', type=int, help='editor sampling steps (default: config value, 50)')
+    parser.add_argument('--editor_work_side', type=int, default=0)
     return parser
 
 
@@ -288,6 +289,7 @@ def load_runtime(args, trainable_controller=False, trainable_editor=False):
     editor = FluxEditor.from_pretrained(args.editor_model, edit_device, torch.float32 if edit_device == 'cpu' else torch.bfloat16, args.editor_adapter, trainable_editor)
     if getattr(args, 'num_denoise_steps', None):
         editor.num_steps = args.num_denoise_steps
+    editor.work_side = getattr(args, 'editor_work_side', 0) or None
     verifier = TwoStageVerifier(load_vlm_scorer(args.verifier_model, verify_device, torch.float32 if verify_device == 'cpu' else torch.bfloat16))
     grounder = Grounder.from_pretrained(args.detector_model, args.sam_model, verify_device)
     return ReDAGHarness(verifier, grounder), controller, editor

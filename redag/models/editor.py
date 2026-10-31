@@ -76,6 +76,7 @@ class FluxEditor:
         self.dit_model = self
         self.batched_cfg = True
         self.num_steps, self.eta, self.cfg_scale = num_steps, eta, cfg_scale
+        self.work_side, self.context, self.max_upscale = None, 0.25, 4.0
         self.vae.requires_grad_(False).eval()
         self.pipeline.text_encoder.requires_grad_(False).eval()
 
@@ -237,25 +238,45 @@ class FluxEditor:
     def encode_text(self, instruction):
         return self.pipeline.encode_prompt(instruction, device=self.device)[0].detach()
 
-    def _crop(self, image, action):
-        x1, y1, x2, y2 = defnorm_box_to_pixel_slice(action.box, *image.shape[-2:])
-        return image[:, y1:y2, x1:x2]
+    def _geometry(self, image, action):
+        height, width = image.shape[-2:]
+        x1, y1, x2, y2 = defnorm_box_to_pixel_slice(action.box, height, width)
+        if not self.work_side:
+            return (x1, y1, x2, y2), (x1, y1, x2, y2), (y2 - y1, x2 - x1)
+        pad_x, pad_y = round((x2 - x1) * self.context), round((y2 - y1) * self.context)
+        cx1, cy1, cx2, cy2 = max(0, x1 - pad_x), max(0, y1 - pad_y), min(width, x2 + pad_x), min(height, y2 + pad_y)
+        scale = min(self.max_upscale, max(1.0, self.work_side / max(cx2 - cx1, cy2 - cy1)))
+        return (x1, y1, x2, y2), (cx1, cy1, cx2, cy2), (max(1, round((cy2 - cy1) * scale)), max(1, round((cx2 - cx1) * scale)))
+
+    def _context(self, image, geometry):
+        (x1, y1, x2, y2), (cx1, cy1, cx2, cy2), size = geometry
+        crop = image[:, cy1:cy2, cx1:cx2]
+        if size != tuple(crop.shape[-2:]):
+            crop = F.interpolate(crop.unsqueeze(0).float(), size=size, mode="bilinear", align_corners=False).squeeze(0).clamp(0, 1)
+        sy, sx = size[0] / (cy2 - cy1), size[1] / (cx2 - cx1)
+        top, left = int((y1 - cy1) * sy), int((x1 - cx1) * sx)
+        window = torch.zeros((1, *size), device=image.device)
+        window[:, top:max(top + 1, round((y2 - cy1) * sy)), left:max(left + 1, round((x2 - cx1) * sx))] = 1
+        return crop, window
 
     @torch.no_grad()
     def prepare(self, image, action, mask=None):
-        crop = self._crop(image, action)
+        geometry = self._geometry(image, action)
+        crop, window = self._context(image, geometry)
         z_src = self.encode_image(crop)
-        if mask is None:
-            latent_mask = torch.ones((1, 1, *z_src.shape[-2:]), device=self.device)
-        else:
+        if mask is not None:
             if mask.ndim == 2:
                 mask = mask.unsqueeze(0)
             if mask.ndim != 3 or mask.shape[0] != 1 or mask.shape[-2:] != image.shape[-2:]:
                 raise ValueError("The edit mask must match the full canvas")
-            latent_mask = self.encode_mask(self._crop(mask, action).unsqueeze(0), z_src)
+            _, (cx1, cy1, cx2, cy2), size = geometry
+            region = mask[:, cy1:cy2, cx1:cx2].float()
+            if tuple(region.shape[-2:]) != size:
+                region = F.interpolate(region.unsqueeze(0), size=size, mode="nearest").squeeze(0)
+            window = window * region.to(window.device)
         return {
             "z_src": z_src, "text_embeds": self.encode_text(action.instruction),
-            "null_text_embeds": self.encode_text(""), "mask_latent": latent_mask,
+            "null_text_embeds": self.encode_text(""), "mask_latent": self.encode_mask(window.unsqueeze(0), z_src),
         }
 
     @torch.no_grad()
@@ -275,11 +296,16 @@ class FluxEditor:
     @torch.no_grad()
     def sample(self, image, action, seed=42, conditioning=None):
         conditioning = self.prepare(image, action) if conditioning is None else conditioning
-        crop_size = self._crop(image, action).shape[-2:]
-        return sample_flow_sde_trajectory(
-            self, lambda z: self.decode_latents(z, output_size=crop_size), **conditioning,
+        (x1, y1, x2, y2), (cx1, cy1, cx2, cy2), size = self._geometry(image, action)
+        result = sample_flow_sde_trajectory(
+            self, lambda z: self.decode_latents(z, output_size=size), **conditioning,
             num_steps=self.num_steps, eta=self.eta, cfg_scale=self.cfg_scale, seed=seed,
         )
+        crop = result["edited_crop"]
+        if tuple(crop.shape[-2:]) != (cy2 - cy1, cx2 - cx1):
+            crop = F.interpolate(crop.unsqueeze(0), size=(cy2 - cy1, cx2 - cx1), mode="bilinear", align_corners=False, antialias=True).squeeze(0)
+        result["edited_crop"] = crop[:, y1 - cy1:y2 - cy1, x1 - cx1:x2 - cx1].clamp(0, 1)
+        return result
 
     def render(self, image, action, seed=42):
         return self.sample(image, action, seed=seed)["edited_crop"].to(image.device)
