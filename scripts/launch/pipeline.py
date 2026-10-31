@@ -63,7 +63,7 @@ def settings():
         s[key] = int(env(key, default))
     s.update(CKPT_MINUTES=float(env('CKPT_MINUTES', 20)), COST_BUDGET=float(env('COST_BUDGET', 0)), GENERATION_COST=float(env('GENERATION_COST', 1)),
              RS_HARD_MULTIPLIER=int(env('RS_HARD_MULTIPLIER', 1)), RS_LAYOUT=env('RS_LAYOUT', 'shard'), EVAL_LAYOUT=env('EVAL_LAYOUT', 'shard'),
-             RL_LAYOUT=env('RL_LAYOUT', 'auto'), EVAL_EDITOR_ARGS=env('EVAL_EDITOR_ARGS', ''),
+             RL_LAYOUT=env('RL_LAYOUT', 'auto'), EVAL_EDITOR_ARGS=env('EVAL_EDITOR_ARGS', ''), TRAIN_EDITOR_ARGS=env('TRAIN_EDITOR_ARGS', ''),
              EXPERIMENTS=env('EXPERIMENTS', '1 2 3').split(), MB_SPLITS=env('MB_SPLITS', 'dev train').split())
     return s
 
@@ -200,7 +200,7 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
                              '--adapter', sft / 'planner', '--device', 'cuda:0', '--output', out / 'planner_sft.json'],
         gpus=1, deps=('sft_planner',), hours=0.5, group=g)
     rs_common = [py, 'scripts/collect_controller_rs.py', *runtime, '--editor_adapter', sft / 'editor', '--verifier_device', 'cuda:0',
-                 '--num_denoise_steps', s['STEPS_EVAL']] + (['--hard_multiplier', s['RS_HARD_MULTIPLIER']] if s['RS_HARD_MULTIPLIER'] > 1 else [])
+                 '--num_denoise_steps', s['STEPS_EVAL'], *s['TRAIN_EDITOR_ARGS'].split()] + (['--hard_multiplier', s['RS_HARD_MULTIPLIER']] if s['RS_HARD_MULTIPLIER'] > 1 else [])
     if s['RS_LAYOUT'] == 'split':
         add('rs_single', rs_common + ['--device', 'cuda:0', '--editor_device', 'cuda:1', '--data', data / 'controller_rs_states.jsonl',
                                       '--output', data / 'controller_sft.jsonl'], gpus=2, deps=('sft_editor',) + canvases, hours=2.0, group=g)
@@ -233,7 +233,7 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
     rl_gpus = 1 if single else 2
     rl = [py, 'scripts/run_rl_alternating.py', *runtime, '--controller_adapter', sft / 'controller', '--editor_adapter', sft / 'editor',
           '--device', 'cuda:0', '--verifier_device', 'cuda:0', '--editor_device', 'cuda:0' if single else 'cuda:1',
-          '--num_denoise_steps', s['STEPS_RL'], '--rollout_steps', s['ROLLOUT_STEPS'], '--dev_data', data / 'rl_dev.jsonl']
+          '--num_denoise_steps', s['STEPS_RL'], '--rollout_steps', s['ROLLOUT_STEPS'], '--dev_data', data / 'rl_dev.jsonl', *s['TRAIN_EDITOR_ARGS'].split()]
     trained = ('sft_controller', 'sft_editor', 'check_data_phase2')
     add('rl_main', rl + ['--data', data / 'rl_train.jsonl', '--reward_mode', 'subgraph_credit_ours', '--output', runs / 'rl' / 'main'],
         gpus=rl_gpus, deps=trained, hours=12.0, group=g)

@@ -193,7 +193,8 @@ def evaluate_rl_development(records, harness, controller, editor, reference):
         if target is None:
             continue
         sample = sample_parent_action(controller, harness, state, dag, target, 42, 0)
-        _, _, accept, _ = harness.evaluate_candidate_action(state, dag, target, sample['action'], editor.render(state.image, sample['action'], seed=42))
+        crop, editable = harness.render(editor, state, sample['action'], 42, harness.editable_mask(state, dag, target, sample['action']))
+        _, _, accept, _ = harness.evaluate_candidate_action(state, dag, target, sample['action'], crop, editable)
         accepted, attempts = accepted + int(accept), attempts + 1
         new = controller.forward_sample(sample, action_only=True)
         try:
@@ -408,23 +409,31 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
                     state, dag, target = select_failed_parent(record, harness)
                     if target is None:
                         continue
-                    items, rewards, conditioning = [], [], None
+                    items, rewards, conditioning, editable = [], [], None, None
                     editor.eval()
                     if stage == 'edit_rl':
                         action = sample_parent_action(controller, harness, state, dag, target, seed, 0)['action']
-                        conditioning = editor.prepare(state.image, action)
+                        editable = harness.editable_mask(state, dag, target, action)
+                        if editable is not None:
+                            try:
+                                conditioning = editor.prepare(state.image, action, editable)
+                            except ValueError:
+                                editable = None
+                        if editable is None:
+                            conditioning = editor.prepare(state.image, action)
                     # editor noise: shared by the controller candidates of one parent (they differ only by action),
                     # distinct for the editor candidates of one parent, and fresh for every parent and step
                     noise_seed = seed + 1000 * step + 10 * parent_index
                     for index in range(cfg.group_size_ctrl if stage == 'ctrl_rl' else cfg.group_size_edit):
                         if stage == 'ctrl_rl':
                             item = sample_parent_action(controller, harness, state, dag, target, seed + step * 100 + index, 0.8)
-                            action, crop = item['action'], editor.render(state.image, item['action'], seed=noise_seed)
+                            action = item['action']
+                            crop, editable = harness.render(editor, state, action, noise_seed, harness.editable_mask(state, dag, target, action))
                             item['inputs'] = {k: v.cpu() if torch.is_tensor(v) else v for k, v in item['inputs'].items()}
                         else:
                             item = editor.sample(state.image, action, seed=noise_seed + index, conditioning=conditioning)
                             crop = item.pop('edited_crop')
-                        delivered, reward, _, affected = harness.evaluate_candidate_action(state, dag, target, action, crop.to(state.image.device))
+                        delivered, reward, _, affected = harness.evaluate_candidate_action(state, dag, target, action, crop.to(state.image.device), editable)
                         if audit_rng.random() < 0.05:
                             save_training_audit(output, f'{reward_mode}_{step}_{parent_index}_{index}', state, delivered, dag, affected, reward_mode, stage, step, harness.lam)
                         rewards.append(ablation_reward(reward_mode, state, delivered, dag, reward, harness, controller, editor, rollout_steps))

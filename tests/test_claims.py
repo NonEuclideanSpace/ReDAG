@@ -270,3 +270,12 @@ def test_cost_budget_setting_reaches_evaluation_commands(monkeypatch):
     monkeypatch.setenv('GENERATION_COST', '12')
     exp1 = {j.name: j for j in pipeline.build_jobs(pipeline.settings())[0]}['exp1_s0'].cmd
     assert exp1[exp1.index('--cost_budget') + 1] == '300.0' and exp1[exp1.index('--generation_cost') + 1] == '12.0'
+
+
+def test_training_editor_arguments_reach_rl_and_rejection_sampling_only(monkeypatch):
+    clean_env(monkeypatch)
+    monkeypatch.setenv('TRAIN_EDITOR_ARGS', '--protect_masks')
+    by_name = {j.name: j for j in pipeline.build_jobs(pipeline.settings())[0]}
+    assert '--protect_masks' in by_name['rl_main'].cmd and '--protect_masks' in by_name['rl_exp2_subgraph_credit_ours'].cmd
+    assert any('--protect_masks' in job.cmd for name, job in by_name.items() if name.startswith('rs_'))
+    assert all('--protect_masks' not in job.cmd for name, job in by_name.items() if name.startswith(('exp1_', 'sft_', 'exp3_')))
