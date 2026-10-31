@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 from collections import Counter, defaultdict
+from pathlib import Path
 
 
 def graphs(path):
@@ -41,21 +42,43 @@ def fisher(a, b, c, d):
 
 
 def label(name, mode):
-    prefix = name.split('.')[0]
-    return f'{prefix}/{mode}'
+    prefix = name.split('.s')[0].removeprefix('exp1').removeprefix('_')
+    return mode if prefix in ('', mode) else f'{prefix}/{mode}'
 
 
-def missed_damage(paths, main, stress, drop):
-    counts = defaultdict(Counter)
+def total(rows, indices):
+    out = Counter()
+    for index in indices:
+        out.update(rows.get(index, Counter()))
+    return out
+
+
+def coverage(paths):
+    covered = defaultdict(set)
+    for path in paths:
+        name = Path(path).name
+        group = 'stress' if name.startswith('stress_') else 'main'
+        with open(path, encoding='utf-8') as handle:
+            next(handle, None)
+            for line in handle:
+                try:
+                    _, mode, index, _ = json.loads(line)['key'].split('|')
+                except (ValueError, KeyError):
+                    continue
+                covered[group, label(name, mode)].add(int(index))
+    return covered
+
+
+def missed_damage(paths, main, stress, drop, covered):
+    counts = defaultdict(lambda: defaultdict(Counter))
     for path in paths:
         for row in map(json.loads, open(path)):
             _, mode, index, _ = row['key'].split('|')
-            types, children, parents, _ = (stress if row['file'].startswith('stress_') else main)[int(index)]
+            group = 'stress' if row['file'].startswith('stress_') else 'main'
+            types, children, parents, _ = (stress if group == 'stress' else main)[int(index)]
             target = row['target']
             anchors = {target} | {p for p in parents.get(target, ()) if types.get(p) == 'entity'}
-            group = 'stress' if row['file'].startswith('stress_') else 'main'
-            tag = row['file'].split('.')[0]
-            c = counts[(group, tag if group == 'stress' else 'exp1', mode)]
+            c = counts[group, label(row['file'], mode)][int(index)]
             c['accepted_steps'] += 1
             damaged_step = False
             for node in descendants(children, anchors) - {target}:
@@ -69,23 +92,38 @@ def missed_damage(paths, main, stress, drop):
                     c[f'{where}_{types.get(node, "?")}'] += 1
                     damaged_step |= where == 'unchecked'
             c['steps_with_unchecked'] += damaged_step
-    for key, c in sorted(counts.items()):
+    for key, rows in sorted(counts.items()):
+        c = total(rows, rows)
         kinds = {k.split('_', 1)[1]: v for k, v in c.items() if k.startswith('unchecked_')}
-        print('MISSED %-28s accepted steps %4d satisfied dependents %4d unchecked damaged %3d (steps %3d) checked damaged %3d by type %s' % (
-            '/'.join(key), c['accepted_steps'], c['satisfied_dependents'], c['unchecked'], c['steps_with_unchecked'], c['checked'], kinds))
-    for group in sorted({g for g, _, _ in counts}):
-        rows = {(t, m): c for (g, t, m), c in counts.items() if g == group}
-        for (tag_a, mode_a), a in rows.items():
-            for (tag_b, mode_b), b in rows.items():
-                if mode_a == 'spatial_no_gates' and mode_b == 'redag_full' and tag_a == tag_b:
-                    print('FISHER %s %s unchecked dependents %d/%d vs %d/%d p %.2g | steps %d/%d vs %d/%d p %.2g | all damage %d/%d vs %d/%d p %.2g' % (
-                        group, tag_a, a['unchecked'], a['satisfied_dependents'], b['unchecked'], b['satisfied_dependents'],
-                        fisher(a['unchecked'], a['satisfied_dependents'] - a['unchecked'], b['unchecked'], b['satisfied_dependents'] - b['unchecked']),
-                        a['steps_with_unchecked'], a['accepted_steps'], b['steps_with_unchecked'], b['accepted_steps'],
-                        fisher(a['steps_with_unchecked'], a['accepted_steps'] - a['steps_with_unchecked'], b['steps_with_unchecked'], b['accepted_steps'] - b['steps_with_unchecked']),
-                        a['unchecked'] + a['checked'], a['satisfied_dependents'], b['unchecked'] + b['checked'], b['satisfied_dependents'],
-                        fisher(a['unchecked'] + a['checked'], a['satisfied_dependents'] - a['unchecked'] - a['checked'],
-                               b['unchecked'] + b['checked'], b['satisfied_dependents'] - b['unchecked'] - b['checked'])))
+        print('MISSED %-36s records %3d accepted steps %4d satisfied dependents %4d unchecked damaged %3d (steps %3d) checked damaged %3d by type %s' % (
+            '/'.join(key), len(rows), c['accepted_steps'], c['satisfied_dependents'], c['unchecked'], c['steps_with_unchecked'], c['checked'], kinds))
+    references = {'main': 'redag_full', 'stress': 'stress_main/redag_full'}
+    pooled = defaultdict(lambda: [Counter(), Counter(), 0, 0])
+    for (group, run), rows in sorted(counts.items()):
+        reference = counts.get((group, references[group]))
+        if run == references[group] or reference is None:
+            continue
+        common = sorted(covered.get((group, run), set(rows)) & covered.get((group, references[group]), set(reference)))
+        a, b = total(rows, common), total(reference, common)
+        print('FISHER %s %s vs %s common records %d | %s' % (group, run, references[group], len(common), tests(a, b)))
+        entry = pooled[run.removeprefix(references[group].rsplit('/', 1)[0] + '/') if '/' in references[group] else run]
+        entry[0].update(a)
+        entry[1].update(b)
+        entry[2] += len(common)
+        entry[3] += 1
+    for run, (a, b, records, groups) in sorted(pooled.items()):
+        if groups > 1:
+            print('FISHER pooled %s vs reference common records %d | %s' % (run, records, tests(a, b)))
+
+
+def tests(a, b):
+    out = []
+    for name, hit, base in (('unchecked dependents', 'unchecked', 'satisfied_dependents'), ('steps', 'steps_with_unchecked', 'accepted_steps')):
+        out.append('%s %d/%d vs %d/%d p %.2g' % (name, a[hit], a[base], b[hit], b[base], fisher(a[hit], a[base] - a[hit], b[hit], b[base] - b[hit])))
+    da, db = a['unchecked'] + a['checked'], b['unchecked'] + b['checked']
+    out.append('all damage %d/%d vs %d/%d p %.2g' % (da, a['satisfied_dependents'], db, b['satisfied_dependents'],
+                                                    fisher(da, a['satisfied_dependents'] - da, db, b['satisfied_dependents'] - db)))
+    return ' | '.join(out)
 
 
 def stress_outcomes(paths, stress):
@@ -114,11 +152,13 @@ def main():
     parser.add_argument('--stress_data', default='data/final/eval_stress.jsonl')
     parser.add_argument('--steps', nargs='*', default=[])
     parser.add_argument('--sessions', nargs='*', default=[])
+    parser.add_argument('--cases', nargs='*', default=[])
     parser.add_argument('--drop', type=float, default=0.08)
     args = parser.parse_args()
     main_graphs, stress_graphs = graphs(args.data), graphs(args.stress_data)
     if args.steps:
-        missed_damage(args.steps, main_graphs, stress_graphs, args.drop)
+        scored = {json.loads(line)['file'] for path in args.steps for line in open(path)}
+        missed_damage(args.steps, main_graphs, stress_graphs, args.drop, coverage([p for p in args.cases if Path(p).name in scored]))
     if args.sessions:
         stress_outcomes(args.sessions, stress_graphs)
 
