@@ -239,6 +239,20 @@ def test_multiturn_new_dependency_invalidates_previously_satisfied_child():
     revised = preserve_previous_conditions({'nodes': [{'node_id': 'root', 'node_type': 'entity', 'question': 'Is the cup blue?', 'entity_phrase': 'cup'}], 'superseded_ids': ['root']}, ConditionDAG(nodes))
     assert revised.nodes['root'].question == 'Is the cup blue?' and revised.nodes['child'].question == 'child' and nodes['root'].question == 'root'
 
+def test_session_moves_on_after_two_failed_attempts_on_one_target():
+    nodes = {'a': ConditionNode('a', 'entity', 'a', 'a', (0.1, 0.1, 0.2, 0.2), weight=2.0, scope='local'),
+             'b': ConditionNode('b', 'entity', 'b', 'b', (0.7, 0.7, 0.8, 0.8), scope='local')}
+    dag = ConditionDAG(nodes)
+    parent = CanvasState(torch.zeros(3, 20, 20), {'a': 0.1, 'b': 0.1}, set())
+    controller = SimpleNamespace(sample=lambda state, graph, target, **kwargs: {'action': ControllerAction('modify_attr', graph.nodes[target].bbox, 'Fix it.')})
+    editor = SimpleNamespace(render=lambda *args, **kwargs: torch.ones(3, 4, 4))
+    harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.9 if question == 'b' else 0.1), None)
+    state, _, trace = harness.run_session(parent, dag, controller, editor, max_steps=4, group_size=1)
+    assert [step['target_node_id'] for step in trace] == ['a', 'a', 'b', 'a'] and state.scores['b'] == 0.9
+    harness.retry_limit = 10
+    _, _, trace = harness.run_session(parent, dag, controller, editor, max_steps=4, group_size=1)
+    assert [step['target_node_id'] for step in trace] == ['a', 'a', 'a', 'a']
+
 @pytest.mark.parametrize('budget', [1, 2])
 def test_local_budget_spent_per_call_and_sibling_grounding_is_restored(budget):
     nodes = {f'n{i}': ConditionNode(f'n{i}', 'entity', f'n{i}', f'n{i}', (0.8, 0.8, 0.9, 0.9) if i else (0.1, 0.1, 0.2, 0.2), scope='local') for i in range(20)}

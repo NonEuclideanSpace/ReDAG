@@ -19,6 +19,7 @@ class ReDAGHarness:
         self.mode, self.history, self.last_candidate = mode, [], None
         self.verification_budget = self.generation_budget = self.render_limit = None
         self.generation_counter, self.last_run, self.unknown_nodes = 0, {}, set()
+        self.retry_limit = 2
 
     def effective_graph(self, dag):
         if self.mode not in ('redag_full', 'flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates'):
@@ -124,7 +125,7 @@ class ReDAGHarness:
             self.verifier.call_limit = calls + self.verification_budget
         if old_limits[1] is None and self.generation_budget is not None:
             self.render_limit = renders + self.generation_budget
-        reason = 'step_budget'
+        reason, failures = 'step_budget', {}
         try:
             for step in range(max_steps):
                 if self.unknown_nodes:
@@ -134,6 +135,7 @@ class ReDAGHarness:
                 if not frontier:
                     reason = 'satisfied' if all(state.scores[n] >= dag.nodes[n].threshold for n in dag.nodes) else 'blocked_frontier'
                     break
+                frontier.sort(key=lambda nid: failures.get(nid, 0) >= self.retry_limit)
                 group_calls, group_renders = self.verifier.call_counter, self.generation_counter
                 candidates = self.sample_group(state, dag, controller, editor, frontier[0], group_size, seed + step * group_size)
                 if not candidates:
@@ -144,6 +146,10 @@ class ReDAGHarness:
                 chosen['verifier_calls'] = self.verifier.call_counter - group_calls
                 records.append(chosen)
                 state = chosen['delivered_state']
+                if chosen['accepted']:
+                    failures.clear()
+                else:
+                    failures[frontier[0]] = failures.get(frontier[0], 0) + 1
                 if chosen['accepted'] and self.grounder is not None:
                     dag = self.grounder.ground(state.image, dag, chosen['affected'])
                 if self.mode != 'flat_full':
