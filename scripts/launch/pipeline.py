@@ -62,7 +62,7 @@ def settings():
     for key, default in ints.items():
         s[key] = int(env(key, default))
     s.update(CKPT_MINUTES=float(env('CKPT_MINUTES', 20)), RS_LAYOUT=env('RS_LAYOUT', 'shard'), EVAL_LAYOUT=env('EVAL_LAYOUT', 'shard'),
-             RL_LAYOUT=env('RL_LAYOUT', 'auto'),
+             RL_LAYOUT=env('RL_LAYOUT', 'auto'), EVAL_EDITOR_ARGS=env('EVAL_EDITOR_ARGS', ''),
              EXPERIMENTS=env('EXPERIMENTS', '1 2 3').split(), MB_SPLITS=env('MB_SPLITS', 'dev train').split())
     return s
 
@@ -250,7 +250,7 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
     split = s['EVAL_LAYOUT'] == 'split'
     eval_gpus = 2 if split else 1
     devices = ['--device', 'cuda:0', '--verifier_device', 'cuda:0', '--editor_device', 'cuda:1' if split else 'cuda:0']
-    evaluate = [py, 'scripts/run_eval_benchmarks.py', *runtime]
+    evaluate = [py, 'scripts/run_eval_benchmarks.py', *runtime, *s['EVAL_EDITOR_ARGS'].split()]
     if '1' in s['EXPERIMENTS']:
         modes = ['flat_full', 'tree_rollback_only', 'redag_full'] + (['spatial_local', 'spatial_no_gates'] if s['EXP1_EXTRA'] else [])
         n = s['EXP1_SHARDS']

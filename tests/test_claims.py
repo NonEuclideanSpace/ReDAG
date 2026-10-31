@@ -250,3 +250,14 @@ def test_files_being_written_are_listed_relative_to_the_root(tmp_path):
     old = time.time() - 120
     os.utime(tmp_path / 'runs' / 'logs' / 'old.log', (old, old))
     assert pipeline.fresh_local(tmp_path, 15) == ['/data/final/new.png']
+
+
+def test_evaluation_editor_arguments_reach_evaluations_only(monkeypatch):
+    clean_env(monkeypatch)
+    monkeypatch.setenv('EVAL_EDITOR_ARGS', '--editor_work_side 512 --protect_masks')
+    by_name = {j.name: j for j in pipeline.build_jobs(pipeline.settings())[0]}
+    exp1 = by_name['exp1_s0'].cmd
+    assert exp1[exp1.index('--editor_work_side') + 1] == '512' and '--protect_masks' in exp1
+    assert all('--protect_masks' not in job.cmd for name, job in by_name.items() if not name.startswith(('exp1_', 'exp2_eval', 'exp3_')))
+    monkeypatch.delenv('EVAL_EDITOR_ARGS')
+    assert '--editor_work_side' not in {j.name: j for j in pipeline.build_jobs(pipeline.settings())[0]}['exp1_s0'].cmd
