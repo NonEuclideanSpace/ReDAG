@@ -307,5 +307,6 @@ class FluxEditor:
         result["edited_crop"] = crop[:, y1 - cy1:y2 - cy1, x1 - cx1:x2 - cx1].clamp(0, 1)
         return result
 
-    def render(self, image, action, seed=42):
-        return self.sample(image, action, seed=seed)["edited_crop"].to(image.device)
+    def render(self, image, action, seed=42, mask=None):
+        conditioning = None if mask is None else self.prepare(image, action, mask)
+        return self.sample(image, action, seed=seed, conditioning=conditioning)["edited_crop"].to(image.device)
