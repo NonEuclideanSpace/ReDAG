@@ -2,10 +2,12 @@ from copy import deepcopy
 from dataclasses import asdict
 import torch
 from redag.config import ReDAGConfig
-from redag.graph.schema import CanvasState, ConditionDAG
-from redag.graph.dag import compute_active_frontier, compute_affected_subgraph, compute_spatial_subgraph, edit_footprint, get_dependency_descendants
+from redag.graph.schema import CanvasState, ConditionDAG, ControllerAction
+from redag.graph.dag import CANVAS, compute_active_frontier, compute_affected_subgraph, compute_spatial_subgraph, edit_footprint, get_dependency_descendants
 from redag.edit.compositor import check_local_acceptance, paste_window_strictly_local
 from redag.learn.credit import compute_subgraph_reward
+
+BASELINE_MODES = ('flat_full', 'tree_rollback_only')
 
 
 class ReDAGHarness:
@@ -55,7 +57,7 @@ class ReDAGHarness:
     def initialize(self, image, dag):
         if self.grounder is not None:
             dag = self.grounder.ground(image, dag)
-        self.verifier.two_stage = self.mode != 'flat_full'
+        self.verifier.two_stage = self.mode not in BASELINE_MODES
         self.unknown_nodes = set()
         scores = self.verify_current(image, dag, dict.fromkeys(dag.nodes, 0.0), set(dag.nodes))
         return CanvasState(image, scores, {n for n in dag.nodes if n not in self.unknown_nodes and scores[n] >= dag.nodes[n].threshold}), dag
@@ -63,7 +65,7 @@ class ReDAGHarness:
     def evaluate_candidate_action(self, parent_state, dag, target_node_id, action, edited_crop):
         calls, start = self.verifier.call_counter, len(self.verifier.records)
         graph = self.effective_graph(dag)
-        self.verifier.two_stage = self.mode != 'flat_full'
+        self.verifier.two_stage = self.mode not in BASELINE_MODES
         candidate = paste_window_strictly_local(parent_state.image, edited_crop, action.box, self.feather_px)
         if self.mode == 'redag_full':
             affected = compute_affected_subgraph(dag, action, target_node_id, parent_state.protected_set)
@@ -102,6 +104,8 @@ class ReDAGHarness:
                 self.generation_counter += 1
                 # common editor noise inside one group (candidates differ only by their action),
                 # different noise across groups, steps and evaluation seeds
+                if self.mode in BASELINE_MODES:
+                    sample['action'] = ControllerAction(sample['action'].op, CANVAS, sample['action'].instruction)
                 crop = editor.render(state.image, sample['action'], seed=seed)
                 try:
                     self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop)

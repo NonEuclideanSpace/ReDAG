@@ -239,6 +239,18 @@ def test_multiturn_new_dependency_invalidates_previously_satisfied_child():
     revised = preserve_previous_conditions({'nodes': [{'node_id': 'root', 'node_type': 'entity', 'question': 'Is the cup blue?', 'entity_phrase': 'cup'}], 'superseded_ids': ['root']}, ConditionDAG(nodes))
     assert revised.nodes['root'].question == 'Is the cup blue?' and revised.nodes['child'].question == 'child' and nodes['root'].question == 'root'
 
+@pytest.mark.parametrize('mode,box,two_stage', [('flat_full', (0.0, 0.0, 1.0, 1.0), False), ('tree_rollback_only', (0.0, 0.0, 1.0, 1.0), False),
+                                                  ('redag_full', (0.1, 0.1, 0.2, 0.2), True)])
+def test_baselines_edit_the_whole_image_and_verify_in_one_stage(mode, box, two_stage):
+    nodes = {'a': ConditionNode('a', 'entity', 'a', 'a', (0.1, 0.1, 0.2, 0.2), scope='local')}
+    parent = CanvasState(torch.zeros(3, 20, 20), {'a': 0.1}, set())
+    seen = []
+    controller = SimpleNamespace(sample=lambda state, graph, target, **kwargs: {'action': ControllerAction('modify_attr', (0.1, 0.1, 0.2, 0.2), 'Fix it.')})
+    editor = SimpleNamespace(render=lambda image, action, seed: seen.append(action.box) or torch.ones(3, 4, 4))
+    harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.9), None, mode=mode)
+    candidates = harness.sample_group(parent, ConditionDAG(nodes), controller, editor, 'a', group_size=1)
+    assert seen == [box] and candidates[0]['action'].box == box and harness.verifier.two_stage is two_stage
+
 def test_session_moves_on_after_two_failed_attempts_on_one_target():
     nodes = {'a': ConditionNode('a', 'entity', 'a', 'a', (0.1, 0.1, 0.2, 0.2), weight=2.0, scope='local'),
              'b': ConditionNode('b', 'entity', 'b', 'b', (0.7, 0.7, 0.8, 0.8), scope='local')}
