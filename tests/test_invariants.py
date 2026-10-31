@@ -21,6 +21,17 @@ def test_eq3_strict_pixel_invariance_outside_window():
     mask[64:192, 64:192] = False
     assert torch.equal(out[:, mask], canvas[:, mask])
 
+def test_protected_pixels_inside_the_window_are_copied_from_the_canvas():
+    canvas, crop = torch.rand(3, 64, 64), torch.ones(3, 32, 32)
+    editable = torch.ones(64, 64)
+    editable[20:28, 20:28] = 0
+    out = paste_window_strictly_local(canvas, crop, (0.25, 0.25, 0.75, 0.75), feather_px=0, editable=editable)
+    assert torch.equal(out[:, 20:28, 20:28], canvas[:, 20:28, 20:28]) and torch.equal(out[:, :16], canvas[:, :16])
+    assert torch.equal(out[:, 16:20, 16:48], torch.ones(3, 4, 32))
+    with pytest.raises(ValueError):
+        paste_window_strictly_local(canvas, crop, (0.25, 0.25, 0.75, 0.75), editable=torch.full((64, 64), 0.5))
+
+
 def test_eq4_eq5_subgraph_isolation_and_zero_delta():
     dag = build_mock_dag()
     affected = compute_affected_subgraph(dag, ControllerAction('modify_attr', (0.04, 0.04, 0.14, 0.14), 'fix v1'), 'v1')
@@ -323,8 +334,10 @@ def test_local_edits_keep_verified_protected_entities_out_of_the_editable_mask()
         seen.append(mask)
         return torch.ones(3, 8, 8)
     controller = SimpleNamespace(sample=lambda state, graph, target, **kwargs: {'action': action})
+    harness.feather_px = 0
     candidates = harness.sample_group(state, dag, controller, SimpleNamespace(render=render), 'red', group_size=1)
-    assert len(candidates) == 1 and torch.equal(seen[0], red)
+    pasted = candidates[0]['candidate_state'].image
+    assert len(candidates) == 1 and torch.equal(seen[0], red) and float(pasted[:, 14, 14].sum()) == 0 and float(pasted[:, 9, 9].sum()) == 3
     harness.mode = 'spatial_no_gates'
     assert harness.editable_mask(state, dag, 'red', action) is None
 
