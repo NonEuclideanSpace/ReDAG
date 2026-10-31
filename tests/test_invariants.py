@@ -289,3 +289,30 @@ def test_local_budget_spent_per_call_and_sibling_grounding_is_restored(budget):
     verifier.call_limit = None
     candidates = harness.sample_group(parent, dag, controller, editor, 'n0', group_size=2)
     assert len(candidates) == 2 and seen == [3, 3, 3] and grounder.counts == {'n0': 3}
+
+
+def test_local_windows_render_at_a_working_resolution_with_context(monkeypatch):
+    import math
+    import redag.models.editor as editor_module
+    editor = object.__new__(type('CpuEditor', (editor_module.FluxEditor,), {'device': torch.device('cpu')}))
+    editor.work_side, editor.context, editor.max_upscale = None, 0.25, 4.0
+    editor.num_steps, editor.eta, editor.cfg_scale = 5, 0.35, 3.5
+    editor.vae = SimpleNamespace(config=SimpleNamespace(block_out_channels=[1, 2, 3, 4]))
+    editor.encode_image = lambda crop: torch.zeros(1, 4, math.ceil(crop.shape[-2] / 16), math.ceil(crop.shape[-1] / 16))
+    editor.encode_text = lambda text: torch.zeros(1, 2, 8)
+    image, action = torch.rand(3, 96, 96), ControllerAction('modify_attr', (0.25, 0.25, 0.5, 0.5), 'Change it.')
+    assert editor._geometry(image, action) == ((24, 24, 48, 48), (24, 24, 48, 48), (24, 24))
+    assert editor.prepare(image, action)['mask_latent'].all()
+    editor.work_side = 512
+    assert editor._geometry(image, action) == ((24, 24, 48, 48), (18, 18, 54, 54), (144, 144))
+    mask = editor.prepare(image, action)['mask_latent']
+    assert mask.shape == (1, 1, 9, 9) and mask[0, 0, 4, 4] == 1 and mask[0, 0, 0, 0] == 0 and mask[0, 0, 8, 8] == 0
+    seen = {}
+    def fake_trajectory(model, decoder, **kwargs):
+        seen.update(kwargs)
+        return {'edited_crop': torch.full((3, 144, 144), 0.5)}
+    monkeypatch.setattr(editor_module, 'sample_flow_sde_trajectory', fake_trajectory)
+    crop = editor.sample(image, action, seed=1)['edited_crop']
+    assert crop.shape == (3, 24, 24) and torch.allclose(crop, torch.full_like(crop, 0.5)) and seen['mask_latent'].shape == (1, 1, 9, 9)
+    whole = ControllerAction('modify_attr', (0.0, 0.0, 1.0, 1.0), 'Change it.')
+    assert editor._geometry(image, whole) == ((0, 0, 96, 96), (0, 0, 96, 96), (384, 384))
