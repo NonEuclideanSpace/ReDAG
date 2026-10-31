@@ -65,11 +65,11 @@ class ReDAGHarness:
         scores = self.verify_current(image, dag, dict.fromkeys(dag.nodes, 0.0), set(dag.nodes))
         return CanvasState(image, scores, {n for n in dag.nodes if n not in self.unknown_nodes and scores[n] >= dag.nodes[n].threshold}), dag
 
-    def evaluate_candidate_action(self, parent_state, dag, target_node_id, action, edited_crop):
+    def evaluate_candidate_action(self, parent_state, dag, target_node_id, action, edited_crop, editable=None):
         calls, start = self.verifier.call_counter, len(self.verifier.records)
         graph = self.effective_graph(dag)
         self.verifier.two_stage = self.mode not in BASELINE_MODES
-        candidate = paste_window_strictly_local(parent_state.image, edited_crop, action.box, self.feather_px)
+        candidate = paste_window_strictly_local(parent_state.image, edited_crop, action.box, self.feather_px, editable)
         if self.mode == 'redag_full':
             affected = compute_affected_subgraph(dag, action, target_node_id, parent_state.protected_set)
         elif self.mode in ('spatial_local', 'spatial_no_gates'):
@@ -123,10 +123,10 @@ class ReDAGHarness:
     def render(self, editor, state, action, seed, mask):
         if mask is not None:
             try:
-                return editor.render(state.image, action, seed=seed, mask=mask)
+                return editor.render(state.image, action, seed=seed, mask=mask), mask
             except ValueError:
                 pass
-        return editor.render(state.image, action, seed=seed)
+        return editor.render(state.image, action, seed=seed), None
 
     def sample_group(self, state, dag, controller, editor, target_node_id, group_size=6, seed=42):
         candidates, grounding = [], self.grounding_state()
@@ -145,9 +145,9 @@ class ReDAGHarness:
                 # different noise across groups, steps and evaluation seeds
                 if self.mode in BASELINE_MODES:
                     sample['action'] = ControllerAction(sample['action'].op, CANVAS, sample['action'].instruction)
-                crop = self.render(editor, state, sample['action'], seed, self.editable_mask(state, graph, target_node_id, sample['action']))
+                crop, editable = self.render(editor, state, sample['action'], seed, self.editable_mask(state, graph, target_node_id, sample['action']))
                 try:
-                    self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop)
+                    self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop, editable)
                 except RuntimeError as error:
                     if str(error) != 'Verifier call budget exhausted':
                         raise

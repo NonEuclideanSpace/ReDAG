@@ -23,7 +23,7 @@ def build_inner_feather_mask(h_win: int, w_win: int, feather_px: int=8, device: 
     x_ramp = torch.clamp(x_dist / float(eff_f), 0.0, 1.0)
     return (y_ramp[:, None] * x_ramp[None, :]).unsqueeze(0)
 
-def paste_window_strictly_local(canvas: torch.Tensor, edited_crop: torch.Tensor, window_box: BBox, feather_px: int=8) -> torch.Tensor:
+def paste_window_strictly_local(canvas: torch.Tensor, edited_crop: torch.Tensor, window_box: BBox, feather_px: int=8, editable: torch.Tensor | None=None) -> torch.Tensor:
     if edited_crop.ndim != 3 or edited_crop.shape[0] != 3 or not torch.isfinite(edited_crop).all():
         raise ValueError("Edited crop must be a finite RGB tensor")
     edited_crop = edited_crop.to(canvas).clamp(0, 1)
@@ -32,6 +32,10 @@ def paste_window_strictly_local(canvas: torch.Tensor, edited_crop: torch.Tensor,
     h_win, w_win = (Y2 - Y1, X2 - X1)
     resized_crop = F.interpolate(edited_crop.unsqueeze(0), size=(h_win, w_win), mode='bilinear', align_corners=False).squeeze(0)
     alpha = build_inner_feather_mask(h_win, w_win, feather_px=feather_px, device=canvas.device)
+    if editable is not None:
+        if editable.shape[-2:] != (H, W) or not torch.all((editable == 0) | (editable == 1)):
+            raise ValueError("The editable mask must be a binary full-canvas mask")
+        alpha = alpha * editable.reshape(-1, H, W)[-1:, Y1:Y2, X1:X2].to(alpha)
     out = canvas.clone()
     out[:, Y1:Y2, X1:X2] = alpha * resized_crop + (1.0 - alpha) * canvas[:, Y1:Y2, X1:X2]
     return out
