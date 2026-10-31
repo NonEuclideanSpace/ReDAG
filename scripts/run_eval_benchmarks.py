@@ -118,6 +118,10 @@ def export_case(state, dag, trace, folder, identifier, group, budget, config):
             steps[-1]['refuted_drops'] = list(step['refuted_drops'])
         if step.get('sample', {}).get('closure_nodes'):
             steps[-1].update(closure_nodes=list(step['sample']['closure_nodes']), instruction=step['action'].instruction)
+        if step.get('sample', {}).get('preserve_nodes'):
+            steps[-1].update(preserve_nodes=list(step['sample']['preserve_nodes']), instruction=step['action'].instruction)
+        if 'controller_box' in step.get('sample', {}):
+            steps[-1].update(controller_box=list(step['sample']['controller_box']), box=list(step['action'].box))
     return {'id': identifier, 'group': group, 'views': views, 'final': final['id'], 'steps': steps, 'execution': dict(budget), 'min_gain': config.min_target_gain, 'max_drop': config.max_protected_drop}
 
 
@@ -218,7 +222,7 @@ def main():
             stages=stages, modes=modes, seed=args.seed, max_steps=args.max_steps, budgets=[args.verification_budget, args.generation_budget] + ([args.cost_budget, args.generation_cost] if args.cost_budget else []) + (['per_turn'] if args.budget_per_turn else []),
             num_denoise_steps=args.num_denoise_steps, models=[args.controller_model, args.editor_model, args.verifier_model,
                                                              args.detector_model, args.sam_model])
-        variant = [flag for flag in ('closure_instructions', 'confirm_drops', 'soft_gating') if getattr(args, flag, False)]
+        variant = [flag for flag in ('closure_instructions', 'confirm_drops', 'soft_gating', 'preserve_instructions', 'dag_box') if getattr(args, flag, False)] + (['strong_edges'] if getattr(args, 'edge_policy', 'full') == 'strong' else [])
         if variant:
             fingerprint['variant'] = variant
         cache = CaseCache(Path(args.output).with_suffix('.cases.jsonl'), fingerprint)

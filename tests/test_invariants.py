@@ -487,3 +487,45 @@ def test_soft_gating_only_waits_for_entity_presence():
     assert sorted(frontier[:2]) == ['bowl', 'red'] and frontier[2:] == ['shiny']
     harness.mode = 'spatial_no_gates'
     assert sorted(harness.active_frontier(dag, scores)) == ['blue', 'bowl', 'red', 'shiny']
+
+
+def test_strong_edges_keep_entity_dependencies_and_drop_weak_links():
+    from redag.harness.environment import strong_edges
+    nodes = {'cup': ConditionNode('cup', 'entity', 'cup', 'cup'), 'table': ConditionNode('table', 'entity', 'table', 'table'),
+             'red': ConditionNode('red', 'attribute', 'red', 'cup'), 'on': ConditionNode('on', 'relation', 'on', 'cup', depends_on=['cup', 'table']),
+             'shiny': ConditionNode('shiny', 'attribute', 'shiny', 'cup', depends_on=['red']), 'sky': ConditionNode('sky', 'background', 'sky', 'sky', depends_on=['table'])}
+    dag = ConditionDAG(nodes, comp_edges=[('cup', 'red'), ('red', 'shiny')], supp_edges=[('table', 'cup')], int_edges=[('cup', 'table')])
+    strong = strong_edges(dag)
+    assert strong.comp_edges == [('cup', 'red')] and not strong.supp_edges and not strong.int_edges
+    assert strong.nodes['on'].depends_on == ['cup', 'table'] and strong.nodes['shiny'].depends_on == [] and strong.nodes['sky'].depends_on == []
+    assert dag.nodes['shiny'].depends_on == ['red']
+    harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.5), None)
+    scores = {'cup': 0.9, 'table': 0.9, 'red': 0.1, 'on': 0.9, 'shiny': 0.1, 'sky': 0.1}
+    assert 'shiny' not in harness.active_frontier(dag, scores)
+    harness.edge_policy = 'strong'
+    assert 'shiny' in harness.active_frontier(dag, scores)
+
+
+def test_preservation_instructions_and_snapped_boxes_follow_the_graph():
+    nodes = {'cup': ConditionNode('cup', 'entity', 'Is there a cup?', 'cup', (0.1, 0.1, 0.3, 0.3), scope='local'),
+             'table': ConditionNode('table', 'entity', 'Is there a table?', 'table', (0.0, 0.3, 1.0, 1.0), scope='local'),
+             'plate': ConditionNode('plate', 'entity', 'Is there a plate?', 'plate', (0.6, 0.4, 0.8, 0.6), scope='local'),
+             'red': ConditionNode('red', 'attribute', 'Is the cup red?', 'cup', scope='local'),
+             'on': ConditionNode('on', 'relation', 'Is the cup on the table?', 'cup', (0.0, 0.1, 1.0, 1.0), scope='local', depends_on=['cup', 'table']),
+             'near': ConditionNode('near', 'relation', 'Is the cup near the plate?', 'cup', (0.1, 0.1, 0.8, 0.6), scope='local', depends_on=['cup', 'plate'])}
+    dag = ConditionDAG(nodes, comp_edges=[('cup', 'red')])
+    scores = {'cup': 0.9, 'table': 0.9, 'plate': 0.9, 'red': 0.1, 'on': 0.9, 'near': 0.2}
+    state = CanvasState(torch.zeros(3, 20, 20), scores, {'cup', 'table', 'plate', 'on'})
+    harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.5), None)
+    action = ControllerAction('modify_attr', (0.1, 0.1, 0.3, 0.3), 'Make it red.')
+    assert harness.preserve_requirements(state, dag, 'red', action) == ['on', 'cup']
+    assert harness.snapped_box(dag, 'red', action.box) == pytest.approx((0.09, 0.09, 0.31, 0.31))
+    assert harness.snapped_box(dag, 'near', action.box) == pytest.approx((0.065, 0.075, 0.835, 0.625))
+    assert harness.snapped_box(dag, 'cup', action.box) == action.box
+    seen = []
+    controller = SimpleNamespace(sample=lambda state, graph, target, **kwargs: {'action': action})
+    editor = SimpleNamespace(render=lambda image, action, seed: seen.append(action) or torch.ones(3, 4, 4))
+    harness.preserve_instructions, harness.dag_box = True, True
+    candidates = harness.sample_group(state, dag, controller, editor, 'red', group_size=1)
+    assert seen[0].instruction == 'Make it red. Keep these unchanged: the cup is on the table; there is a cup.' or seen[0].instruction.startswith('Make it red. Keep these unchanged: the cup is on the table')
+    assert candidates[0]['sample']['preserve_nodes'] == ['on', 'cup'] and seen[0].box == pytest.approx((0.09, 0.09, 0.31, 0.31))
