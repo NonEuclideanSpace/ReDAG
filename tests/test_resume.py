@@ -246,6 +246,8 @@ def test_experiment3_sft_stage_reuses_experiment1_sessions(tmp_path, monkeypatch
     exp1 = ['--exp_id', 1, '--exp1_modes', 'flat_full', 'redag_full', '--controller_adapter', tmp_path / 'sft' / 'controller',
             '--editor_adapter', tmp_path / 'sft' / 'editor', '--output', tmp_path / 'eval' / 'exp1.s0.json']
     assert eval_main(monkeypatch, tmp_path, common + exp1) == 6
+    cached = [json.loads(line) for line in (tmp_path / 'eval' / 'exp1.s0.cases.jsonl').read_text().splitlines()[1:]]
+    assert len(cached) == 6 and all(row['editor'] == [0, False] and 'code' in row for row in cached)
     stages = tmp_path / 'eval' / 'stages.json'
     stages.write_text(json.dumps({'zero_shot': {'controller': None, 'editor': None},
                                   'sft': {'controller': '../sft/controller', 'editor': '../sft/editor'}}))

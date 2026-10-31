@@ -91,6 +91,14 @@ def reusable_sessions(path, fingerprint, stages):
     return found
 
 
+def code_revision():
+    import subprocess
+    try:
+        return subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1], timeout=10).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def export_case(state, dag, trace, folder, identifier, group, budget, config):
     views, steps = {}, []
     final = export_view(state.image, dag, folder, identifier + '_final')
@@ -206,6 +214,7 @@ def main():
             num_denoise_steps=args.num_denoise_steps, models=[args.controller_model, args.editor_model, args.verifier_model,
                                                              args.detector_model, args.sam_model]))
         reusable = reusable_sessions(args.reuse_cases, cache.fingerprint, stages) if args.reuse_cases and args.exp_id == 3 else {}
+        provenance = dict(code=code_revision(), editor=[args.editor_work_side or 0, bool(args.protect_masks)])
         work = [(stage, mode, index, seed) for stage in stages for mode in modes for index in mine for seed in seeds]
         done_count = sum(f'{stage}|{mode}|{index}|{seed}' in cache for stage, mode, index, seed in work)
         if done_count:
@@ -253,7 +262,8 @@ def main():
                                 case = export_case(state, dag, trace, folder, identifier, f'{stage}/{mode}/{k}', harness.last_run, harness.config)
                                 row = cache.add(key, case=case, k=k, final_image=case['views'][case['final']]['image'],
                                                 description={'requirements': [node.question for node in dag.nodes.values()],
-                                                             'source': str(record['image']) if isinstance(record['image'], (str, Path)) else None})
+                                                             'source': str(record['image']) if isinstance(record['image'], (str, Path)) else None},
+                                                **provenance)
                                 done_count += 1
                                 report(done_count, len(work), 'sessions')
                             if row['case']['id'] != identifier:
