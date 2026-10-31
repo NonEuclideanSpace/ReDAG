@@ -191,3 +191,15 @@ def test_requested_restart_relaunches_without_using_an_attempt(tmp_path):
     assert result['outcome'] == 'complete'
     assert count.read_text() == '2'
     assert not (state / 'job.failed').exists() and not (state / 'job.restart').exists()
+
+
+def test_gpu_still_holding_memory_is_not_reassigned_in_the_poll_its_job_ended(tmp_path):
+    scheduler = make(tmp_path, [Job('a', 'x', gpus=1)], gpus=[0, 1], gpu_free_mib=2000)
+    scheduler.gpu_info = [dict(index=0, name='g', used=100, total=96000), dict(index=1, name='g', used=3000, total=96000)]
+    scheduler.running = {'a': dict(gpus=[1])}
+    scheduler.refresh_gpus()
+    assert scheduler.free_gpus() == [0]
+    scheduler.running = {}
+    assert scheduler.free_gpus() == [0]
+    scheduler.gpu_info[1]['used'] = 500
+    assert scheduler.free_gpus() == [0, 1]
