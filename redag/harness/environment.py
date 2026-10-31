@@ -22,6 +22,7 @@ class ReDAGHarness:
         self.verifier.gate_tau = self.config.gate_tau
         self.mode, self.history, self.last_candidate = mode, [], None
         self.verification_budget = self.generation_budget = self.render_limit = None
+        self.cost_budget, self.generation_cost, self.cost_origin = None, 1.0, None
         self.generation_counter, self.last_run, self.unknown_nodes = 0, {}, set()
         self.retry_limit = 2
         self.protect_masks, self.mask_margin, self.container_share, self.min_editable = False, 16, 0.5, 0.2
@@ -120,6 +121,10 @@ class ReDAGHarness:
             return None
         return editable
 
+    def spent_cost(self):
+        calls, renders = self.cost_origin
+        return (self.generation_counter - renders) * self.generation_cost + (self.verifier.call_counter - calls)
+
     def render(self, editor, state, action, seed, mask):
         if mask is not None:
             try:
@@ -135,6 +140,8 @@ class ReDAGHarness:
                 if self.render_limit is not None and self.generation_counter >= self.render_limit:
                     break
                 if self.verifier.call_limit is not None and self.verifier.call_counter >= self.verifier.call_limit:
+                    break
+                if self.cost_budget is not None and self.cost_origin is not None and self.spent_cost() >= self.cost_budget:
                     break
                 self.restore_grounding(grounding)
                 graph = deepcopy(dag)
@@ -169,6 +176,9 @@ class ReDAGHarness:
         if old_limits[1] is None and self.generation_budget is not None:
             self.render_limit = renders + self.generation_budget
         reason, failures = 'step_budget', {}
+        own_origin = self.cost_origin is None
+        if own_origin:
+            self.cost_origin = (calls, renders)
         try:
             for step in range(max_steps):
                 if self.unknown_nodes:
@@ -219,6 +229,8 @@ class ReDAGHarness:
         finally:
             self.last_run = dict(generation_calls=self.generation_counter - renders, verifier_calls=self.verifier.call_counter - calls, stop_reason=reason, unknown_node_ids=sorted(self.unknown_nodes))
             self.verifier.call_limit, self.render_limit = old_limits
+            if own_origin:
+                self.cost_origin = None
 
     def run_conversation(self, image, prompts, planner, controller, editor, max_steps=10, seed=42, group_size=1):
         from redag.models.planner import preserve_previous_conditions
@@ -279,6 +291,7 @@ def run_record(record, harness, controller, editor, max_steps=10, seed=42, group
     calls, renders = harness.verifier.call_counter, harness.generation_counter
     limits = harness.verifier.call_limit, harness.render_limit
     harness.history, harness.last_run, harness.unknown_nodes = [], {}, set()
+    harness.cost_origin = (calls, renders)
     verification_limits = [x for x in (limits[0], calls + harness.verification_budget if harness.verification_budget is not None else None) if x is not None]
     generation_limits = [x for x in (limits[1], renders + harness.generation_budget if harness.generation_budget is not None else None) if x is not None]
     harness.verifier.call_limit = min(verification_limits, default=None)
@@ -296,6 +309,7 @@ def run_record(record, harness, controller, editor, max_steps=10, seed=42, group
     finally:
         harness.last_run.update(generation_calls=harness.generation_counter - renders, verifier_calls=harness.verifier.call_counter - calls)
         harness.verifier.call_limit, harness.render_limit = limits
+        harness.cost_origin = None
 
 
 def add_runtime_arguments(parser):

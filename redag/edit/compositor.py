@@ -37,7 +37,7 @@ def paste_window_strictly_local(canvas: torch.Tensor, edited_crop: torch.Tensor,
             raise ValueError("The editable mask must be a binary full-canvas mask")
         alpha = alpha * editable.reshape(-1, H, W)[-1:, Y1:Y2, X1:X2].to(alpha)
     out = canvas.clone()
-    out[:, Y1:Y2, X1:X2] = alpha * resized_crop + (1.0 - alpha) * canvas[:, Y1:Y2, X1:X2]
+    out[:, Y1:Y2, X1:X2] = (alpha * resized_crop + (1.0 - alpha) * canvas[:, Y1:Y2, X1:X2]).clamp(0, 1)
     return out
 
 def check_local_acceptance(dag: ConditionDAG, target_node_id: str, prev_scores: Dict[str, float], new_scores: Dict[str, float], protected_set: Set[str], affected_subgraph: Set[str], min_target_gain: float=0.05, max_protected_drop: float=0.08) -> bool:

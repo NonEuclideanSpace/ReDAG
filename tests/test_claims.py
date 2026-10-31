@@ -261,3 +261,12 @@ def test_evaluation_editor_arguments_reach_evaluations_only(monkeypatch):
     assert all('--protect_masks' not in job.cmd for name, job in by_name.items() if not name.startswith(('exp1_', 'exp2_eval', 'exp3_')))
     monkeypatch.delenv('EVAL_EDITOR_ARGS')
     assert '--editor_work_side' not in {j.name: j for j in pipeline.build_jobs(pipeline.settings())[0]}['exp1_s0'].cmd
+
+
+def test_cost_budget_setting_reaches_evaluation_commands(monkeypatch):
+    clean_env(monkeypatch)
+    assert '--cost_budget' not in {j.name: j for j in pipeline.build_jobs(pipeline.settings())[0]}['exp1_s0'].cmd
+    monkeypatch.setenv('COST_BUDGET', '300')
+    monkeypatch.setenv('GENERATION_COST', '12')
+    exp1 = {j.name: j for j in pipeline.build_jobs(pipeline.settings())[0]}['exp1_s0'].cmd
+    assert exp1[exp1.index('--cost_budget') + 1] == '300.0' and exp1[exp1.index('--generation_cost') + 1] == '12.0'
