@@ -205,51 +205,52 @@ AUTO_SHUTDOWN=done                                     # 全部完成后 10 分�
 | 拒绝采样 `--hard_multiplier`，每组候选写入 `<output>.groups.jsonl` | | 供成对离线训练 |
 | 缓存行记录 `code`、`editor`、`variant`；合并前按此过滤 | | 采用 |
 | 调度器不把显存仍被占用的卡分出去 | `17a550b` | 采用 |
-| 边增强：`--closure_instructions`（编辑实体时把同框内未满足的属性/关系写进指令）、`--confirm_drops`（仅因依赖边进入检查的受保护节点下降时，先比较编辑前后的放大证据区域，像素未变或放大分数未降则不算损伤）、`--soft_gating`（只有实体存在是硬前提，其余父节点只影响顺序） | `dfd43fd` `846b372` | 评估中：`runs/eval/exp1_redag_edge.s*` |
+| 边增强：`--closure_instructions`（编辑实体时把同框内未满足的属性/关系写进指令）、`--confirm_drops`（仅因依赖边进入检查的受保护节点下降时，先比较编辑前后的放大证据区域）、`--soft_gating`（只有实体存在是硬前提） | `dfd43fd` `846b372` | **未采用**：见 10.2 第 4 条 |
+| `scripts/judge_finals.py`（最终图裁判，可换模型、可续跑）、`scripts/paired_report.py`（配对表、拆分、组件统计、裁判一致性） | `bad67ca` | 分析工具 |
 
 `local.env` 可写项：`EVAL_EDITOR_ARGS`、`TRAIN_EDITOR_ARGS`、`COST_BUDGET`、`GENERATION_COST`、`BUDGET_PER_TURN`、`RS_HARD_MULTIPLIER`。`COST_BUDGET` 等尚未进入 `RESULT_KEYS`，开新实验前请加入并重置相关任务。
 
 ### 10.2 结论（同记录同种子配对；“接受数” = 每会话被接受的编辑数；评测参数 `--max_steps 4 --generation_budget 8 --verification_budget 400`）
 
-1. **对整图基线，越复杂优势越大**（75 对，s0/s1/s10）：
+1. **对整图基线，越复杂优势越大**：
 
    | | 对 flat_full | 对 tree_rollback_only |
    |---|---|---|
-   | 全部 | 1.59 vs 1.17（好 27 / 差 9，p = 0.004） | 1.59 vs 1.25（27 / 13，p = 0.04） |
+   | 全部 | 1.69 vs 1.19（101 对，好 43 / 差 12，p < 0.001） | 1.59 vs 1.27（78 对，28 / 14） |
    | K = 10 | 1.56 vs 1.48（不显著） | 1.56 vs 1.60（不显著） |
    | K = 30 | 1.85 vs 1.00（14 / 2，p = 0.004） | 1.85 vs 0.96（15 / 2，p = 0.002） |
    | 轮数 ≥ 3 | 1.68 vs 1.10（20 / 4，p = 0.002） | 1.68 vs 1.18（19 / 6，p = 0.015） |
    | 依赖密集 | 1.74 vs 1.18（16 / 5，p = 0.03） | 1.74 vs 1.24（16 / 6，p = 0.05） |
 
-   损伤（候选打坏的已满足条件）2.9 vs 8.2 / 会话；验证调用 77 vs 108。整图编辑每次打坏 12% 已满足条件，全部存活率随已满足数 m 近似按 0.88^m 下降（`pm_curve_1708.txt`）。
-2. **对无边版 spatial_no_gates（50 对）不占优**：1.62 vs 1.70（11 / 13），K = 20 时 1.38 vs 1.81（1 / 7，p = 0.07）；验证调用 78.5 vs 67.8。依赖边的代价是检查范围更大、门控堵塞前沿。边增强开关针对这三点。
-3. **共同裁判（Qwen3-VL-8B 对最终图逐条打分，不分模式、不门控）**：满足率四种方法都在 0.72–0.76。依赖一致满足（子条件只有在所有父条件都满足时才计）：对 flat +0.64（22 / 14，p = 0.24），对 tree +0.64（24 / 14，p = 0.14），对无边版 +0.30（13 / 7，p = 0.26）。每会话只接受 1–2 次编辑，最终满足率变化 ≤ 0.05：编辑器成功率是瓶颈。该裁判与环内验证器同一模型族，不是独立评价。
-4. **RL vs SFT**（58 个未见状态）：贪心接受率 0.517 / 0.552 / 0.586（SFT / RL 控制器 / RL 双方），随机采样 0.517 / 0.483 / 0.500，不显著。
-5. **exp2 等步数**（控制器阶段各 16 步）：奖励方差终端广播 0.063 ≫ 全表 0.009 > 子图信用 0.006；16 个开发状态测不出策略差异。
+   K / 轮数 / 依赖拆分为前 75 对。损伤 3.1 vs 7.8 / 会话；验证调用 80 vs 108。整图编辑每次打坏 12% 已满足条件，全部存活率约按 0.88^m 下降（`pm_curve_1708.txt`）。按轮预算子集（K = 30，每轮生成预算 4，13 对）：接受 2.00 vs 1.23，损伤 4.9 vs 17.8，验证调用 147 vs 256。
+2. **最终图（共同裁判 Qwen3-VL-8B，逐条打分，不分模式、不门控）**：总体满足率四种方法都在 0.72–0.76；依赖一致满足（子条件只有在父条件都满足时才计）在 K = 30 时对 flat +1.42 条（13 / 3，p = 0.02），对 tree +1.46（13 / 3，p = 0.02）；轮数 ≥ 3 时对 flat +0.96（19 / 8，p = 0.05）。K = 10 无差别。该裁判与环内验证器同族，独立裁判（gemma-3-12b-it）的结果见 `report_materials/judge_gemma_*`。
+3. **依赖边相对无边版 spatial_no_gates 没有收益**：95 对接受 1.80 vs 1.87（16 / 20），验证调用 87 vs 75；最终图依赖一致满足 +0.30（13 / 7，p = 0.26，50 对）；有父条件的节点满足率 0.685 vs 0.703。机制诊断（`rejection_reasons_by_mode_2205.txt` 等）：ReDAG 的保护性拒绝更少（9.0% vs 14.0% 的步骤），差距来自目标本身失败更多（62.6% vs 56.5%），集中在实体：首次添加实体被接受 28% vs 49%。门控让 ReDAG 先从零添加实体，无边版常先改子条件并顺带画出实体。无边版的接受几乎全部依赖一致（1.88 → 1.85）。
+4. **边增强版未采用**（事先定的标准：对无边版接受数不低且依赖一致满足更高才采用）：58 对接受 1.59 vs 完整方法 1.64、vs 无边版 1.78；第 1 片最终图比完整方法少满足 0.24 条（2 / 10，p = 0.04）。首次添加实体被接受率 37% vs 31%（略升），但关系与属性目标下降。
+5. **共同裁判下最终满足率变化小**：每会话只接受 1–2 次编辑，K = 10–30 时最终满足率变化 ≤ 0.05；62% 的步骤目标本身未达标，编辑器成功率是瓶颈。
+6. **学习部分**：RL vs SFT（58 个未见状态）贪心接受率 0.517 / 0.552 / 0.586（SFT / RL 控制器 / RL 双方），随机采样 0.517 / 0.483 / 0.500，不显著；exp2 等步数下 16 个开发状态测不出策略差异（奖励方差：终端广播 0.063 ≫ 全表 0.009 > 子图信用 0.006）。
 
 ### 10.3 数据现状（分析素材在 M2 `/root/autodl-tmp/report_materials`；各机 `runs/eval/` 互相同步）
 
-- `exp1.s0/s1/s10.cases.jsonl`：flat / tree / redag 各 25，完整；`exp1.s2`：flat 25 + tree 3。
-- `exp1_spatial_no_gates.s0/s1`：完整；s2–s8 与 `exp1_redag_full.s2–s8` 由各机核心链依次生成。
-- `exp1_redag_edge.s0–s3`：边增强版，每片跑完用共同裁判打分（`judge_edge_s*.jsonl`）。
-- `exp1_turnbudget.s0`：K = 30、每轮生成预算 4，flat / spatial / redag 各 8 条记录。
-- 分析：`python scripts/paired_report.py --base redag_edge/redag_full --judges <裁判 jsonl …>`（配对表、按 K / 轮数 / 依赖密度拆分、组件统计、裁判满足率与依赖一致满足率）；裁判打分：`python scripts/judge_finals.py --cases runs/eval/exp1*.cases.jsonl --model <VLM> --out <jsonl>`（可续跑）。
+- `exp1.s0/s1/s10`：flat / tree / redag 各 25；`exp1.s2`：flat 25 + tree 3。
+- `exp1_spatial_no_gates.s*` 与 `exp1_redag_full.s*`：s0–s4 已完成或接近完成，s5–s9、s11 由各机核心链继续生成；`exp1_spatial_no_gates.s10` 补齐第 10 片的配对。
+- `exp1_redag_edge.s0–s2`：边增强版（未采用），第 1、0 片已裁判（`judge_edge_s*.jsonl`）。
+- `exp1_turnbudget.s0/s1`：K = 30、每轮生成预算 4，flat / spatial / redag。
+- 裁判：共同裁判 `judge_qwen3vl.jsonl`（C、M2）、独立裁判 `judge_gemma.jsonl`（D）、编辑前后全条件打分 `silent_gemma.jsonl`（D，用来统计无边版漏检的损伤）。
 
-### 10.4 学校服务器上按优先级做（实测每会话 4–6 分钟，PRO6000 / A800）
+### 10.4 学校服务器上按优先级做（实测每会话 2–3 分钟，PRO6000 / A800）
 
-1. **边增强版定论**：对 12 片补齐 redag_edge、redag_full、spatial_no_gates（每种 300 会话；扣除已完成部分约 700 会话 ≈ 60 GPU 小时）。命令与调度器的 exp1 任务相同，只改模式、输出名并加开关：
+1. **依赖压力测试**（决定依赖图能否成为论文主张）：构造后续轮次改动父对象（替换、移动、改形状）而子条件应保留的会话，统计各方法“接受了但其实打坏了依赖条件”的比例与最终依赖一致满足；先用 `silent_gemma.jsonl` 的漏检统计判断现有数据里是否已有信号。约 300 会话 × 4 方法 ≈ 50 GPU 小时。
+2. **外部基线**：至少加入一个已发表的多轮 / 指令编辑系统，在同一套条件图与裁判下比较。
+3. **独立评价**：不同家族裁判（`scripts/judge_finals.py --model <VLM>`）+ 50 张图人工标注校准 + 人工盲评。
+4. **主表补齐**：12 片 × {flat, tree, spatial_no_gates, redag_full}，每种 300 会话（扣除已完成约 600 会话 ≈ 25 GPU 小时）：
 
    ```bash
    python scripts/run_eval_benchmarks.py <调度器 exp1 任务的模型与适配器参数> \
      --max_steps 4 --generation_budget 8 --verification_budget 400 --num_denoise_steps 28 \
      --exp_id 1 --data data/final/eval_main.jsonl --num_shards 12 --shard <k> \
-     --exp1_modes redag_full --output runs/eval/exp1_redag_edge.s<k>.json \
-     --closure_instructions --confirm_drops --soft_gating
+     --exp1_modes spatial_no_gates --output runs/eval/exp1_spatial_no_gates.s<k>.json
+   python scripts/paired_report.py --base redag_full --judges <裁判 jsonl …>
    ```
-
-   无边版用 `--exp1_modes spatial_no_gates --output runs/eval/exp1_spatial_no_gates.s<k>.json`，不加开关。采用标准（事先定好）：对无边版接受数不低且依赖一致满足更高 → 作为正式方法；只在依赖密集或多轮子集更好 → 写成条件结论；否则如实写“边只改善一致性”。
-2. **独立评价**：换一个不同家族的 VLM 做裁判（`scripts/judge_finals.py --model <其他家族 VLM>`），并用 50 张图的人工标注校准；再加人工盲评。
-3. **R4 两框动作**（`r4_multi_window_design.md`）→ `RS_HARD_MULTIPLIER=3` 重新拒绝采样 → 控制器 SFT → rl_main。
-4. **RL 测量**：`N_RL_DEV` ≥ 64，每 8 步评估一次，`STEPS_RL` 与 `STEPS_EVAL` 对齐。
-5. **协议子集**：`BUDGET_PER_TURN=1` 下 K = 30 的三种方法各 100 条（约 25 GPU 小时），检验“越复杂越有优势”在等预算下是否成立。
-6. exp3 五阶段消融。
+5. **编辑器瓶颈**：R4 两框动作（`r4_multi_window_design.md`）→ `RS_HARD_MULTIPLIER=3` 重新拒绝采样 → 控制器 SFT → rl_main；实体添加的成功率是首要指标。
+6. **RL 测量**：`N_RL_DEV` ≥ 64，每 8 步评估一次，`STEPS_RL` 与 `STEPS_EVAL` 对齐；若仍不显著，论文中不把 RL 作为贡献。
+7. exp3 五阶段消融。
