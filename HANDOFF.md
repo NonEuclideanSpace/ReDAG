@@ -207,6 +207,7 @@ AUTO_SHUTDOWN=done                                     # 全部完成后 10 分�
 | 调度器不把显存仍被占用的卡分出去 | `17a550b` | 采用 |
 | 边增强：`--closure_instructions`（编辑实体时把同框内未满足的属性/关系写进指令）、`--confirm_drops`（仅因依赖边进入检查的受保护节点下降时，先比较编辑前后的放大证据区域）、`--soft_gating`（只有实体存在是硬前提） | `dfd43fd` `846b372` | **未采用**：见 10.2 第 4 条 |
 | `scripts/judge_finals.py`（最终图裁判，可换模型、可续跑）、`scripts/paired_report.py`（配对表、拆分、组件统计、裁判一致性） | `bad67ca` | 分析工具 |
+| 图驱动生成：`--preserve_instructions`（把目标在图上已满足的邻居实体写成短语 "Keep the X and the Y unchanged."）、`--dag_box`（属性目标框吸附到父实体检测框，关系目标吸附到两个父实体框的并集）、`--edge_policy strong`（只保留实体→属性/关系/计数的组合边与对实体的依赖） | `cca3a6d` `946f484` `c454cf1` | 消融进行中：`exp1_redag_preserve/dagbox/strong.s*` |
 
 `local.env` 可写项：`EVAL_EDITOR_ARGS`、`TRAIN_EDITOR_ARGS`、`COST_BUDGET`、`GENERATION_COST`、`BUDGET_PER_TURN`、`RS_HARD_MULTIPLIER`。`COST_BUDGET` 等尚未进入 `RESULT_KEYS`，开新实验前请加入并重置相关任务。
 
@@ -229,17 +230,26 @@ AUTO_SHUTDOWN=done                                     # 全部完成后 10 分�
 5. **共同裁判下最终满足率变化小**：每会话只接受 1–2 次编辑，K = 10–30 时最终满足率变化 ≤ 0.05；62% 的步骤目标本身未达标，编辑器成功率是瓶颈。
 6. **学习部分**：RL vs SFT（58 个未见状态）贪心接受率 0.517 / 0.552 / 0.586（SFT / RL 控制器 / RL 双方），随机采样 0.517 / 0.483 / 0.500，不显著；exp2 等步数下 16 个开发状态测不出策略差异（奖励方差：终端广播 0.063 ≫ 全表 0.009 > 子图信用 0.006）。
 
+7. **依赖图的价值体现在验证的完整性（漏检损伤，`report_materials/missed_damage_summary_0055.md`）**：对每个被接受的编辑，用 Qwen3-VL-8B 给编辑前后的整图逐条打分，统计目标及其父实体在依赖图上的后代中，编辑前已满足、编辑后跌破阈值或下跌超过 0.08 的条件。无边版未检查就放行的受损依赖条件：主实验 15 / 387（关系 7、属性 5、实体 2、计数 1），压力测试 5 / 114；完整方法分别为 1 / 396 和 0 / 89。合并 20 / 501 vs 1 / 485，Fisher p = 2×10⁻⁵；含检查过仍放行的总受损 5.0% vs 2.5%，p = 0.044。
+8. **外部基线：直接多轮整图编辑**（同一 FLUX.2-klein，零样本，每轮把用户原话当指令编辑一次，无控制器/验证/回滚；第 0 片 25 对，`exp1_direct_flux.s0`）：最终图满足率 0.708；完整方法比它多满足 1.68 条（14 / 5，p = 0.064），依赖一致满足多 2.16 条（15 / 5，p = 0.041）；RL 版多 1.48 条（16 / 4，p = 0.012）。
+9. **依赖压力测试**（`data/final/eval_stress.jsonl`，37 题：把一个带 ≥ 2 条依赖条件的非人物实体改成新颜色，其余不变；构造与审计见 `report_materials/make_stress2.py`、`stress_v3_audit.txt`）：改色成功率 整图 51% / 无边版 70% / 完整方法 57% / 完整方法 + 保持指令 62%；依赖条件保住 113/113、106/113、110/113、108/113；“改色成功且依赖全保住” 51% / 57% / 54% / 54%。完整方法打坏依赖更少，但改色成功率更低。
+10. **RL 多步会话**（`rl_both` = exp2 子图信用臂的 edit_rl 控制器 + 编辑器；第 0、1 片 50 对）：每会话接受数对 SFT 完整方法 1.93 vs 1.67（18 / 11，p = 0.27），对无边版 1.96 vs 1.70（16 / 11），对整图 1.93 vs 1.24（27 / 13，p = 0.04）；最终图满足对 SFT +0.02（14 / 12）。第 2、10 片已跑完，100 对结论见 `report_materials/rlboth_vs_all_*`。
+11. **裁判**：正文统一用 Qwen3-VL-8B（与环内验证器同族）；跨家族裁判已取消。
+
 ### 10.3 数据现状（分析素材在 M2 `/root/autodl-tmp/report_materials`；各机 `runs/eval/` 互相同步）
 
 - `exp1.s0/s1/s10`：flat / tree / redag 各 25；`exp1.s2`：flat 25 + tree 3。
 - `exp1_spatial_no_gates.s*` 与 `exp1_redag_full.s*`：s0–s4 已完成或接近完成，s5–s9、s11 由各机核心链继续生成；`exp1_spatial_no_gates.s10` 补齐第 10 片的配对。
 - `exp1_redag_edge.s0–s2`：边增强版（未采用），第 1、0 片已裁判（`judge_edge_s*.jsonl`）。
 - `exp1_turnbudget.s0/s1`：K = 30、每轮生成预算 4，flat / spatial / redag。
+- `exp1_redag_rlboth.s0/s1/s2/s10`（RL 权重多步会话）、`exp1_direct_flux.s0`（直接编辑基线）、`exp1_redag_zeroshot.s0/s1`（不加载 SFT 适配器的整套系统）、`exp1_redag_preserve/dagbox/strong.s0/s1`（图驱动生成消融）。
+- `stress_main.s0–s2`（压力测试三种方法）、`stress_preserve.s0`（压力测试 + 保持指令）。
+- 漏检与压力打分：`silent_qwen_main.jsonl`、`silent_qwen_stress.jsonl`、`stress_qwen.jsonl`（D 的 `/root/sim`，已复制到 M2 `/root/sim/silent`、`/root/sim/stress`）；分析脚本 `silent_cmp.py`、`stress_report.py`（`report_materials`）。
 - 裁判：共同裁判 `judge_qwen3vl.jsonl`（C、M2）、独立裁判 `judge_gemma.jsonl`（D）、编辑前后全条件打分 `silent_gemma.jsonl`（D，用来统计无边版漏检的损伤）。
 
 ### 10.4 学校服务器上按优先级做（实测每会话 2–3 分钟，PRO6000 / A800）
 
-1. **依赖压力测试**（决定依赖图能否成为论文主张）：构造后续轮次改动父对象（替换、移动、改形状）而子条件应保留的会话，统计各方法“接受了但其实打坏了依赖条件”的比例与最终依赖一致满足；先用 `silent_gemma.jsonl` 的漏检统计判断现有数据里是否已有信号。约 300 会话 × 4 方法 ≈ 50 GPU 小时。
+1. **依赖压力测试扩容**（漏检损伤已显著，下一步是让它在端到端指标上体现）：在改色之外加入移动、替换、放大父对象的模板，每类 ≥ 100 题；论文主张以“依赖完整验证显著减少静默放行的依赖损伤”为核心。原计划：构造后续轮次改动父对象（替换、移动、改形状）而子条件应保留的会话，统计各方法“接受了但其实打坏了依赖条件”的比例与最终依赖一致满足；先用 `silent_gemma.jsonl` 的漏检统计判断现有数据里是否已有信号。约 300 会话 × 4 方法 ≈ 50 GPU 小时。
 2. **外部基线**：至少加入一个已发表的多轮 / 指令编辑系统，在同一套条件图与裁判下比较。
 3. **独立评价**：不同家族裁判（`scripts/judge_finals.py --model <VLM>`）+ 50 张图人工标注校准 + 人工盲评。
 4. **主表补齐**：12 片 × {flat, tree, spatial_no_gates, redag_full}，每种 300 会话（扣除已完成约 600 会话 ≈ 25 GPU 小时）：
