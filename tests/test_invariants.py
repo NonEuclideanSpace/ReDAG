@@ -442,7 +442,8 @@ def test_closure_instructions_fold_pending_children_into_the_entity_edit():
     harness.closure_limit = 3
     assert harness.closure_requirements(state, dag, 'cup', candidates[0]['action']) == ['red', 'on', 'handle']
     assert harness.closure_requirements(state, dag, 'brown', ControllerAction('modify_attr', (0.6, 0.6, 0.9, 0.9), 'x')) == []
-    assert harness.closure_requirements(state, dag, 'cup', ControllerAction('add_entity', (0.7, 0.0, 1.0, 0.2), 'x')) == ['on']
+    assert harness.closure_requirements(state, dag, 'cup', ControllerAction('add_entity', (0.0, 0.5, 1.0, 1.0), 'x')) == ['on']
+    assert harness.closure_requirements(state, dag, 'cup', ControllerAction('add_entity', (0.7, 0.0, 1.0, 0.2), 'x')) == []
     harness.mode = 'spatial_no_gates'
     harness.sample_group(state, dag, controller, editor, 'cup', group_size=1)
     assert seen[2] == 'Add a cup.'
