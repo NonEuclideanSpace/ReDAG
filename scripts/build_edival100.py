@@ -242,17 +242,22 @@ def fetch_zip_entries(zip_url, target_sids):
 
     def download_one(item):
         sid, (comp_method, csz, usz, off, name) = item
-        r = urllib.request.Request(final_url, headers={'Range': f'bytes={off}-{off + csz + 256}'})
-        chunk = urllib.request.urlopen(r, timeout=30).read()
-        lnlen = struct.unpack('<H', chunk[26:28])[0]
-        lelen = struct.unpack('<H', chunk[28:30])[0]
-        payload = chunk[30 + lnlen + lelen:30 + lnlen + lelen + csz]
-        if comp_method == 0:
-            return sid, payload
-        return sid, zlib.decompress(payload, -15)
+        for attempt in range(4):
+            try:
+                r = urllib.request.Request(final_url, headers={'Range': f'bytes={off}-{off + csz + 256}'})
+                chunk = urllib.request.urlopen(r, timeout=45).read()
+                lnlen = struct.unpack('<H', chunk[26:28])[0]
+                lelen = struct.unpack('<H', chunk[28:30])[0]
+                payload = chunk[30 + lnlen + lelen:30 + lnlen + lelen + csz]
+                if comp_method == 0:
+                    return sid, payload
+                return sid, zlib.decompress(payload, -15)
+            except Exception:
+                if attempt == 3:
+                    raise
 
     results = {}
-    with ThreadPoolExecutor(max_workers=12) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         for sid, data in pool.map(download_one, matched.items()):
             results[sid] = data
     return results
@@ -392,12 +397,15 @@ def main():
     eval_dir = repo_root / 'runs/eval'
 
     for model_label, zip_name in zip_map.items():
+        folder = eval_dir / f'{model_label}.s0_images'
+        cases_path = eval_dir / f'{model_label}.s0.cases.jsonl'
+        if cases_path.exists() and folder.exists() and len(list(folder.glob('*.png'))) >= 100:
+            print(f'Skipping {model_label}: already extracted 100 images at {cases_path}')
+            continue
         url = f'https://hf-mirror.com/datasets/C-Tianyu/EdiVal/resolve/main/{zip_name}'
         print(f'Fetching 100 Turn-3 images for {model_label} from {zip_name}...')
         fetched = fetch_zip_entries(url, target_sids)
-        folder = eval_dir / f'{model_label}.s0_images'
         folder.mkdir(parents=True, exist_ok=True)
-        cases_path = eval_dir / f'{model_label}.s0.cases.jsonl'
         with cases_path.open('w', encoding='utf-8') as stream:
             stream.write(json.dumps({'fingerprint': {'baseline': model_label, 'dataset': 'eval_edival100'}}) + '\n')
             for idx, rec in enumerate(records):
