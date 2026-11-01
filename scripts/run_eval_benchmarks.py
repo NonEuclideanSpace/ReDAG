@@ -190,6 +190,14 @@ def main():
             result['training_convergence'], result['full_audits'] = validate_logs(args.training_logs) if args.training_logs else (None, [])
         folder = Path(args.output).parent / (Path(args.output).stem + '_images')
         planner = None
+        if getattr(args, 'online_planner', False):
+            args.allow_small_dataset = True
+            mine_set = {index for index in range(len(records)) if index % args.num_shards == args.shard}
+            for idx in mine_set:
+                for turn in records[idx].get('turns', []):
+                    if isinstance(turn, dict):
+                        turn.pop('graph', None)
+                        turn.pop('dag', None)
         if any(isinstance(turn, str) or ('graph' not in turn and 'dag' not in turn) for r in records for turn in r.get('turns', [])):
             device = args.planner_device or args.device
             planner = Planner.from_pretrained(args.planner_model, device, torch.float32 if device == 'cpu' else torch.bfloat16, args.planner_adapter)
@@ -222,7 +230,7 @@ def main():
             stages=stages, modes=modes, seed=args.seed, max_steps=args.max_steps, budgets=[args.verification_budget, args.generation_budget] + ([args.cost_budget, args.generation_cost] if args.cost_budget else []) + (['per_turn'] if args.budget_per_turn else []),
             num_denoise_steps=args.num_denoise_steps, models=[args.controller_model, args.editor_model, args.verifier_model,
                                                              args.detector_model, args.sam_model])
-        variant = [flag for flag in ('closure_instructions', 'confirm_drops', 'soft_gating', 'preserve_instructions', 'dag_box') if getattr(args, flag, False)] + (['strong_edges'] if getattr(args, 'edge_policy', 'full') == 'strong' else [])
+        variant = [flag for flag in ('closure_instructions', 'confirm_drops', 'soft_gating', 'preserve_instructions', 'dag_box', 'online_planner') if getattr(args, flag, False)] + (['strong_edges'] if getattr(args, 'edge_policy', 'full') == 'strong' else [])
         if variant:
             fingerprint['variant'] = variant
         cache = CaseCache(Path(args.output).with_suffix('.cases.jsonl'), fingerprint)

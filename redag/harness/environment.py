@@ -68,6 +68,7 @@ class ReDAGHarness:
         self.protect_masks, self.mask_margin, self.container_share, self.min_editable_pixels = False, 16, 0.5, 1024
         self.closure_instructions, self.closure_limit, self.confirm_drops, self.soft_gating = False, 3, False, False
         self.preserve_instructions, self.dag_box, self.edge_policy = False, False, 'full'
+        self.counterfactual_credit, self.acceptance_bonus = False, 0.0
 
     def effective_graph(self, dag):
         if self.mode not in ('redag_full', 'flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates'):
@@ -206,7 +207,10 @@ class ReDAGHarness:
                                          self.config.min_target_gain, self.config.max_protected_drop)
         delivered_image = candidate if accepted else parent_state.image
         delivered_scores = raw_scores if accepted else dict(parent_state.scores)
-        reward = compute_subgraph_reward(graph, parent_state.scores, delivered_scores, parent_state.protected_set, affected, self.step_cost, self.lam)
+        reward_scores = raw_scores if self.counterfactual_credit else delivered_scores
+        reward = compute_subgraph_reward(graph, parent_state.scores, reward_scores, parent_state.protected_set, affected, self.step_cost, self.lam)
+        if self.counterfactual_credit and accepted and self.acceptance_bonus > 0:
+            reward = float(reward + self.acceptance_bonus)
         protected = {nid for nid, score in delivered_scores.items() if score >= dag.nodes[nid].threshold}
         state = CanvasState(delivered_image, delivered_scores, protected, parent_state.step_idx + 1)
         self.last_candidate = dict(dag=deepcopy(dag), parent_state=parent_state,
@@ -479,6 +483,9 @@ def add_runtime_arguments(parser):
     parser.add_argument('--preserve_instructions', action='store_true')
     parser.add_argument('--dag_box', action='store_true')
     parser.add_argument('--edge_policy', choices=('full', 'strong'), default='full')
+    parser.add_argument('--counterfactual_credit', action='store_true')
+    parser.add_argument('--acceptance_bonus', type=float, default=0.0)
+    parser.add_argument('--online_planner', action='store_true')
     return parser
 
 
@@ -501,6 +508,8 @@ def load_runtime(args, trainable_controller=False, trainable_editor=False):
     for flag in ('closure_instructions', 'confirm_drops', 'soft_gating', 'preserve_instructions', 'dag_box'):
         setattr(harness, flag, getattr(args, flag, False))
     harness.edge_policy = getattr(args, 'edge_policy', 'full')
+    harness.counterfactual_credit = getattr(args, 'counterfactual_credit', False)
+    harness.acceptance_bonus = float(getattr(args, 'acceptance_bonus', 0.0))
     return harness, controller, editor
 
 

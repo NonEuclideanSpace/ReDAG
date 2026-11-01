@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--rollout_steps", type=int, default=5)
     parser.add_argument("--ppo_epochs", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--restore_best_editor", action="store_true")
     args = parser.parse_args()
     if (Path(args.output) / 'rl_complete.json').exists():  # finished earlier: nothing to load or train
         print('already complete:', Path(args.output) / 'rl_complete.json')
@@ -43,7 +44,7 @@ def main():
     history = train_alternating(harness, controller, editor, records, dev_records, args.output,
                       rounds=args.rounds, epochs=args.epochs, batch_size=args.batch_size,
                       reward_mode=args.reward_mode, rollout_steps=args.rollout_steps, seed=args.seed,
-                      config=ReDAGConfig(ppo_epochs=args.ppo_epochs, **steps), sources=sources)
+                      config=ReDAGConfig(ppo_epochs=args.ppo_epochs, **steps), sources=sources, restore_best_editor=args.restore_best_editor)
     runtime = dict(wall_seconds_including_model_load=time.perf_counter() - started,
                    optimizer_updates=sum(row['optimizer_updates'] for row in history), training_steps=len(history),
                    step_wall_seconds_total=sum(row['step_wall_seconds'] for row in history))
