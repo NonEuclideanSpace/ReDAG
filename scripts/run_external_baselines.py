@@ -17,7 +17,7 @@ from redag.learn.sft_trainer import read_records
 from redag.models.editor import FluxEditor
 from redag.models.planner import preserve_previous_conditions
 from redag.verify.grounder import load_image
-from redag.verify.verifier import Verifier, export_view, load_vlm_scorer
+from redag.verify.verifier import TwoStageVerifier as Verifier, export_view, load_vlm_scorer
 
 EDIT_THINKER_PROMPT = """# Edit Evaluation and Prompt Refinement System
 
@@ -332,7 +332,7 @@ def main():
 
     verifier = None
     if args.baseline in ('best_of_n', 'vision_director', 'genrevisit'):
-        verifier = Verifier(scorer=load_vlm_scorer(args.verifier_model, args.device))
+        verifier = Verifier(load_vlm_scorer(args.verifier_model, args.device))
 
     mllm_bundle = None
     if args.baseline in ('genrevisit', 'edit_thinker', 'replan'):
