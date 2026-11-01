@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /root/autodl-tmp/ReDAG
-export PATH=/root/miniconda3/bin:$PATH
 
-STAGE="${1:-help}"
-SHARD="${2:-0}"
+# Launch script for ReDAG next-stage experiments (preserve all old artifacts).
+# Usage:
+#   bash scripts/launch_next_stage.sh <task> [gpu_id] [shard] [num_shards]
+
+TASK="${1:-help}"
+GPU="${2:-0}"
+SHARD="${3:-0}"
+NUM_SHARDS="${4:-12}"
+
+export CUDA_VISIBLE_DEVICES="${GPU}"
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+PYTHON="${PYTHON:-/root/miniconda3/bin/python}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
 
 COMMON_MODELS=(
   --controller_model /root/autodl-tmp/models/Qwen/Qwen3.5-9B
@@ -13,27 +23,99 @@ COMMON_MODELS=(
   --detector_model /root/autodl-tmp/models/IDEA-Research/grounding-dino-base
   --sam_model /root/autodl-tmp/models/facebook/sam2.1-hiera-large
   --planner_model /root/autodl-tmp/models/Qwen/Qwen3.8-27B
-  --planner_adapter /root/autodl-tmp/ReDAG/runs/sft/planner
+  --device cuda:0
+  --verifier_device cuda:0
+  --editor_device cuda:0
 )
 
-case "$STAGE" in
+case "${TASK}" in
   t1_ctrl_rl)
-    # Evaluate best ctrl_rl checkpoint (0.533 dev acceptance) + SFT editor on shard $SHARD
-    python scripts/run_eval_benchmarks.py "${COMMON_MODELS[@]}"       --controller_adapter /root/autodl-tmp/ReDAG/runs/rl/exp2/subgraph_credit_ours/ctrl_rl/controller       --editor_adapter /root/autodl-tmp/ReDAG/runs/sft/editor       --exp_id 1 --data data/final/eval_main.jsonl --num_shards 12 --shard "$SHARD"       --max_steps 4 --generation_budget 8 --verification_budget 400 --num_denoise_steps 28       --exp1_modes redag_full --output "runs/eval/exp1_redag_ctrlrl.s${SHARD}.json"
+    "${PYTHON}" scripts/run_eval_benchmarks.py "${COMMON_MODELS[@]}" \
+      --exp_id 1 --data data/final/eval_main.jsonl \
+      --exp1_modes redag_full \
+      --controller_adapter runs/rl/exp2/subgraph_credit_ours/ctrl_rl/controller \
+      --editor_adapter runs/sft/editor \
+      --max_steps 4 --generation_budget 8 --verification_budget 400 --num_denoise_steps 28 \
+      --shard "${SHARD}" --num_shards "${NUM_SHARDS}" \
+      --output "runs/eval/exp1_redag_ctrlrl.s${SHARD}.json"
     ;;
+
+  t1_context_pad)
+    "${PYTHON}" scripts/run_eval_benchmarks.py "${COMMON_MODELS[@]}" \
+      --exp_id 1 --data data/final/eval_main.jsonl \
+      --exp1_modes redag_full \
+      --controller_adapter runs/sft/controller \
+      --editor_adapter runs/sft/editor \
+      --editor_context_pad 0.25 \
+      --max_steps 4 --generation_budget 8 --verification_budget 400 --num_denoise_steps 28 \
+      --shard "${SHARD}" --num_shards "${NUM_SHARDS}" \
+      --output "runs/eval/exp1_redag_ctxpad.s${SHARD}.json"
+    ;;
+
   t1_online_planner)
-    # Evaluate Planner-in-the-loop (online DAG construction) on shard $SHARD
-    python scripts/run_eval_benchmarks.py "${COMMON_MODELS[@]}"       --controller_adapter /root/autodl-tmp/ReDAG/runs/sft/controller       --editor_adapter /root/autodl-tmp/ReDAG/runs/sft/editor       --online_planner --allow-small-dataset       --exp_id 1 --data data/final/eval_main.jsonl --num_shards 12 --shard "$SHARD"       --max_steps 4 --generation_budget 8 --verification_budget 400 --num_denoise_steps 28       --exp1_modes redag_full --output "runs/eval/exp1_redag_online_planner.s${SHARD}.json"
+    "${PYTHON}" scripts/run_eval_benchmarks.py "${COMMON_MODELS[@]}" \
+      --exp_id 1 --data data/final/eval_main.jsonl \
+      --exp1_modes redag_full \
+      --planner_adapter runs/sft/planner \
+      --controller_adapter runs/sft/controller \
+      --editor_adapter runs/sft/editor \
+      --online_planner \
+      --max_steps 4 --generation_budget 8 --verification_budget 400 --num_denoise_steps 28 \
+      --shard "${SHARD}" --num_shards "${NUM_SHARDS}" \
+      --output "runs/eval/exp1_redag_online_planner.s${SHARD}.json"
     ;;
+
   t2_stress_expanded)
-    # Run expanded 355-item stress test (recolor, material, resize, relocate) on shard $SHARD (out of 6 shards)
-    python scripts/run_eval_benchmarks.py "${COMMON_MODELS[@]}"       --controller_adapter /root/autodl-tmp/ReDAG/runs/sft/controller       --editor_adapter /root/autodl-tmp/ReDAG/runs/sft/editor       --allow-small-dataset       --exp_id 1 --data data/final/eval_stress_expanded.jsonl --num_shards 6 --shard "$SHARD"       --max_steps 3 --generation_budget 6 --verification_budget 300 --num_denoise_steps 28       --exp1_modes flat_full spatial_no_gates redag_full       --output "runs/eval/stress_expanded.s${SHARD}.json"
+    "${PYTHON}" scripts/run_eval_benchmarks.py "${COMMON_MODELS[@]}" \
+      --exp_id 1 --data data/final/eval_stress_expanded.jsonl \
+      --allow-small-dataset \
+      --exp1_modes redag_full spatial_no_gates flat_full \
+      --controller_adapter runs/sft/controller \
+      --editor_adapter runs/sft/editor \
+      --max_steps 4 --generation_budget 8 --verification_budget 400 --num_denoise_steps 28 \
+      --shard "${SHARD}" --num_shards "${NUM_SHARDS}" \
+      --output "runs/eval/stress_expanded.s${SHARD}.json"
     ;;
+
   t3_rl_counterfactual)
-    # Train alternating RL with Counterfactual Pre-Rollback Subgraph Credit + best_edit restore + 28 denoise steps
-    python scripts/run_rl_alternating.py "${COMMON_MODELS[@]}"       --controller_adapter /root/autodl-tmp/ReDAG/runs/sft/controller       --editor_adapter /root/autodl-tmp/ReDAG/runs/sft/editor       --data data/final/rl_train_exp2.jsonl       --dev_data data/final/rl_dev.jsonl       --output runs/rl/exp2/subgraph_credit_counterfactual       --reward_mode subgraph_credit_ours       --num_denoise_steps 28       --counterfactual_credit --acceptance_bonus 0.05 --restore_best_editor
+    "${PYTHON}" scripts/run_rl_alternating.py "${COMMON_MODELS[@]}" \
+      --train_data data/sft/controller_states.jsonl \
+      --dev_data data/sft/controller_dev_states.jsonl \
+      --controller_adapter runs/sft/controller \
+      --editor_adapter runs/sft/editor \
+      --output_dir runs/rl/exp2_v2_counterfactual \
+      --reward_mode subgraph_credit_ours \
+      --counterfactual_credit \
+      --acceptance_bonus 0.05 \
+      --restore_best_editor \
+      --num_denoise_steps 28 \
+      --max_dev_states 64 \
+      --eval_every 8
     ;;
+
+  t4_edival100_redag)
+    "${PYTHON}" scripts/run_eval_benchmarks.py "${COMMON_MODELS[@]}" \
+      --exp_id 1 --data data/final/eval_edival100.jsonl \
+      --allow-small-dataset \
+      --exp1_modes redag_full \
+      --controller_adapter runs/sft/controller \
+      --editor_adapter runs/sft/editor \
+      --max_steps 4 --generation_budget 8 --verification_budget 400 --num_denoise_steps 28 \
+      --shard "${SHARD}" --num_shards "${NUM_SHARDS}" \
+      --output "runs/eval/edival_redag_full.s${SHARD}.json"
+    ;;
+
+  t4_external)
+    BASELINE_NAME="${3:-mt_opsd}"
+    "${PYTHON}" scripts/run_external_baselines.py \
+      --baseline "${BASELINE_NAME}" \
+      --data data/final/eval_main.jsonl \
+      --shards 0 1 2 10 --num_shards 12 \
+      --device cuda:0
+    ;;
+
   *)
-    echo "Usage: bash scripts/launch_next_stage.sh {t1_ctrl_rl|t1_online_planner|t2_stress_expanded|t3_rl_counterfactual} [shard]"
+    echo "Usage: bash scripts/launch_next_stage.sh {t1_ctrl_rl|t1_context_pad|t1_online_planner|t2_stress_expanded|t3_rl_counterfactual|t4_edival100_redag|t4_external} [gpu_id] [shard_or_baseline] [num_shards]"
+    exit 1
     ;;
 esac

@@ -77,6 +77,7 @@ class FluxEditor:
         self.batched_cfg = True
         self.num_steps, self.eta, self.cfg_scale = num_steps, eta, cfg_scale
         self.work_side, self.context, self.max_upscale = None, 0.25, 4.0
+        self.context_pad = 0.0
         self.vae.requires_grad_(False).eval()
         self.pipeline.text_encoder.requires_grad_(False).eval()
 
@@ -241,10 +242,13 @@ class FluxEditor:
     def _geometry(self, image, action):
         height, width = image.shape[-2:]
         x1, y1, x2, y2 = defnorm_box_to_pixel_slice(action.box, height, width)
-        if not self.work_side:
+        if not self.work_side and not getattr(self, 'context_pad', 0.0):
             return (x1, y1, x2, y2), (x1, y1, x2, y2), (y2 - y1, x2 - x1)
-        pad_x, pad_y = round((x2 - x1) * self.context), round((y2 - y1) * self.context)
+        pad_ratio = self.context_pad if getattr(self, 'context_pad', 0.0) else self.context
+        pad_x, pad_y = round((x2 - x1) * pad_ratio), round((y2 - y1) * pad_ratio)
         cx1, cy1, cx2, cy2 = max(0, x1 - pad_x), max(0, y1 - pad_y), min(width, x2 + pad_x), min(height, y2 + pad_y)
+        if not self.work_side:
+            return (x1, y1, x2, y2), (cx1, cy1, cx2, cy2), (cy2 - cy1, cx2 - cx1)
         scale = min(self.max_upscale, max(1.0, self.work_side / max(cx2 - cx1, cy2 - cy1)))
         return (x1, y1, x2, y2), (cx1, cy1, cx2, cy2), (max(1, round((cy2 - cy1) * scale)), max(1, round((cx2 - cx1) * scale)))
 
