@@ -476,6 +476,7 @@ def add_runtime_arguments(parser):
     parser.add_argument('--planner_device')
     parser.add_argument('--num_denoise_steps', type=int, help='editor sampling steps (default: config value, 50)')
     parser.add_argument('--editor_work_side', type=int, default=0)
+    parser.add_argument('--editor_context_pad', type=float, default=0.0)
     parser.add_argument('--protect_masks', action='store_true')
     parser.add_argument('--closure_instructions', action='store_true')
     parser.add_argument('--confirm_drops', action='store_true')
@@ -501,6 +502,7 @@ def load_runtime(args, trainable_controller=False, trainable_editor=False):
     if getattr(args, 'num_denoise_steps', None):
         editor.num_steps = args.num_denoise_steps
     editor.work_side = getattr(args, 'editor_work_side', 0) or None
+    editor.context_pad = float(getattr(args, 'editor_context_pad', 0.0) or 0.0)
     verifier = TwoStageVerifier(load_vlm_scorer(args.verifier_model, verify_device, torch.float32 if verify_device == 'cpu' else torch.bfloat16))
     grounder = Grounder.from_pretrained(args.detector_model, args.sam_model, verify_device)
     harness = ReDAGHarness(verifier, grounder)

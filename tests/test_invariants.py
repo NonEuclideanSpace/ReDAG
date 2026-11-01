@@ -565,3 +565,28 @@ def test_counterfactual_credit_and_expanded_stress_audit():
         rows = [json.loads(line) for line in expanded.read_text(encoding='utf-8').splitlines() if line.strip()]
         assert len(rows) >= 300
         assert all(not audit(r)[3] for r in rows)
+    # Check native-canvas context_pad geometry without upscaling
+    from redag.models.editor import FluxEditor
+    dummy_editor = object.__new__(FluxEditor)
+    dummy_editor.work_side, dummy_editor.context, dummy_editor.max_upscale = None, 0.25, 4.0
+    dummy_editor.context_pad = 0.25
+    img = torch.zeros(3, 100, 100)
+    act = ControllerAction('modify_attr', (0.2, 0.2, 0.6, 0.6), 'Recolor.')
+    (x1, y1, x2, y2), (cx1, cy1, cx2, cy2), size = dummy_editor._geometry(img, act)
+    assert (x1, y1, x2, y2) == (20, 20, 60, 60)
+    assert (cx1, cy1, cx2, cy2) == (10, 10, 70, 70)
+    assert size == (60, 60)
+    crop, win = dummy_editor._context(img, ((x1, y1, x2, y2), (cx1, cy1, cx2, cy2), size))
+    assert crop.shape == (3, 60, 60) and win.shape == (1, 60, 60)
+    assert float(win.sum().item()) == 40 * 40
+    # Check edival100 dataset if present
+    edival_path = Path('data/final/eval_edival100.jsonl')
+    if edival_path.exists():
+        from redag.models.planner import preserve_previous_conditions
+        erows = [json.loads(line) for line in edival_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+        assert len(erows) == 100
+        for r in erows:
+            g = None
+            for t in r['turns']:
+                g = preserve_previous_conditions(t['graph'], g, t.get('superseded_ids'))
+            assert len(g.nodes) >= 2

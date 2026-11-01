@@ -230,7 +230,7 @@ def main():
             stages=stages, modes=modes, seed=args.seed, max_steps=args.max_steps, budgets=[args.verification_budget, args.generation_budget] + ([args.cost_budget, args.generation_cost] if args.cost_budget else []) + (['per_turn'] if args.budget_per_turn else []),
             num_denoise_steps=args.num_denoise_steps, models=[args.controller_model, args.editor_model, args.verifier_model,
                                                              args.detector_model, args.sam_model])
-        variant = [flag for flag in ('closure_instructions', 'confirm_drops', 'soft_gating', 'preserve_instructions', 'dag_box', 'online_planner') if getattr(args, flag, False)] + (['strong_edges'] if getattr(args, 'edge_policy', 'full') == 'strong' else [])
+        variant = [flag for flag in ('closure_instructions', 'confirm_drops', 'soft_gating', 'preserve_instructions', 'dag_box', 'online_planner') if getattr(args, flag, False)] + (['strong_edges'] if getattr(args, 'edge_policy', 'full') == 'strong' else []) + ([f'context_pad_{args.editor_context_pad:g}'] if getattr(args, 'editor_context_pad', 0.0) > 0 else [])
         if variant:
             fingerprint['variant'] = variant
         cache = CaseCache(Path(args.output).with_suffix('.cases.jsonl'), fingerprint)
