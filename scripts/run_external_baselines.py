@@ -72,7 +72,28 @@ def tensor_to_pil(image):
 
 
 def load_mllm(model_id, device):
+    import os
     from transformers import AutoModelForImageTextToText, AutoProcessor
+    repo_map = {
+        'RePlan-Qwen2.5-VL-7B': 'TainU/RePlan-Qwen2.5-VL-7B',
+        'GenRevisit-RL': 'GenRevisit/GenRevisit-RL',
+        'EditThinker-8B': 'appletea2333/EditThinker-8B',
+    }
+    model_path = Path(model_id)
+    for key, repo_id in repo_map.items():
+        if key in str(model_id):
+            index_file = model_path / 'model.safetensors.index.json'
+            complete = False
+            if index_file.exists():
+                idx_data = json.loads(index_file.read_text())
+                shards = set(idx_data.get('weight_map', {}).values())
+                complete = bool(shards) and all((model_path / s).exists() for s in shards)
+            if not complete:
+                os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
+                from huggingface_hub import snapshot_download
+                target_dir = str(model_path.resolve()) if model_path.is_symlink() else str(model_path)
+                snapshot_download(repo_id=repo_id, local_dir=target_dir, max_workers=8)
+            break
     processor = AutoProcessor.from_pretrained(model_id)
     model = AutoModelForImageTextToText.from_pretrained(model_id, torch_dtype=torch.bfloat16).to(device).eval()
     model.requires_grad_(False)
