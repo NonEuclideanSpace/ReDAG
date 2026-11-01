@@ -278,7 +278,7 @@ def save_training_audit(output, identifier, parent, delivered, dag, affected, me
 
 
 def train_alternating(harness, controller, editor, records, dev_records, output, config=None, rounds=2, epochs=1, batch_size=4,
-                      reward_mode='subgraph_credit_ours', rollout_steps=5, seed=42, sources=None, interrupt_after=None):
+                      reward_mode='subgraph_credit_ours', rollout_steps=5, seed=42, sources=None, interrupt_after=None, restore_best_editor=False):
     """Alternating controller / editor RL (eq. 34, 39, 55), resumable at step granularity.
 
     <output>/resume holds both LoRA adapters, the optimizer of the current stage, the RNG states, the data order, the
@@ -326,7 +326,7 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
     stages = [(r, s) for r in range(rounds) for s in ('ctrl_rl', 'edit_rl')]
     checkpoints = {'zero_shot': {'controller': None, 'editor': None}}
     step, position, epoch, offset, order_index = 0, 0, 0, 0, None
-    baseline, best_p, best_ctrl, optimizer_state = None, None, None, None
+    baseline, best_p, best_ctrl, best_edit, optimizer_state = None, None, None, None, None
 
     def write_stage_file(mapping):
         tmp = output / 'stage_checkpoints.json.tmp'
@@ -343,6 +343,8 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
         tensors = dict(controller=controller.snapshot(), editor=editor.snapshot())
         if best_ctrl is not None and next_position < len(stages) and stages[next_position][1] == 'ctrl_rl':
             tensors['best_ctrl'] = best_ctrl  # only the controller stages restore their best development snapshot
+        if restore_best_editor and best_edit is not None and next_position < len(stages) and stages[next_position][1] == 'edit_rl':
+            tensors['best_edit'] = best_edit
         checkpoint.save(output, dict(fingerprint=fingerprint, step=step, position=next_position, epoch=next_epoch, offset=next_offset,
                                      order=next_order, baseline=baseline, best_p=best_p, checkpoints=checkpoints),
                         tensors=tensors, optimizer=optimizer, objects=dict(rng=rng.getstate(), audit_rng=audit_rng.getstate()))
@@ -365,7 +367,7 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
                              f'or delete {output}')
         controller.load_snapshot(payload['tensors']['controller'])
         editor.load_snapshot(payload['tensors']['editor'])
-        best_ctrl, optimizer_state = payload['tensors'].get('best_ctrl'), payload['optimizer']
+        best_ctrl, best_edit, optimizer_state = payload['tensors'].get('best_ctrl'), payload['tensors'].get('best_edit'), payload['optimizer']
         rng.setstate(payload['objects']['rng'])
         audit_rng.setstate(payload['objects']['audit_rng'])
         checkpoint.set_rng_state(payload['rng'])
@@ -387,7 +389,7 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
                                      lr=cfg.lr_rl_controller if stage == 'ctrl_rl' else cfg.lr_rl_editor, weight_decay=0)
         if baseline is None:  # the stage starts here
             baseline = evaluate_rl_development(dev_records, harness, controller, editor, ctrl_ref)
-            best_p, best_ctrl = baseline['dev_acceptance_p'], controller.snapshot()
+            best_p, best_ctrl, best_edit = baseline['dev_acceptance_p'], controller.snapshot(), (editor.snapshot() if restore_best_editor else None)
             epoch, offset, order_index = 0, 0, None
             save_checkpoint(optimizer, position, 0, 0, None)
         elif optimizer_state is not None:
@@ -471,6 +473,8 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
                 step += 1
                 if stage == 'ctrl_rl' and metrics['dev_acceptance_p'] >= best_p:
                     best_p, best_ctrl = metrics['dev_acceptance_p'], controller.snapshot()
+                elif restore_best_editor and stage == 'edit_rl' and metrics['dev_acceptance_p'] >= best_p:
+                    best_p, best_edit = metrics['dev_acceptance_p'], editor.snapshot()
                 if start + batch_size < len(order):
                     save_checkpoint(optimizer, position, epoch, start + batch_size, order_index)
                 else:
@@ -481,8 +485,10 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
             epoch, offset, order_index = epoch + 1, 0, None
         if stage == 'ctrl_rl':
             controller.load_snapshot(best_ctrl)
+        elif restore_best_editor and stage == 'edit_rl' and best_edit is not None:
+            editor.load_snapshot(best_edit)
         save_stage(stage if round_index == 0 else f'round_2/{stage}')
-        baseline, best_p, best_ctrl, epoch, offset, order_index = None, None, None, 0, 0, None
+        baseline, best_p, best_ctrl, best_edit, epoch, offset, order_index = None, None, None, None, 0, 0, None
     save_stage('alternating_rl')
     write_stage_file({k: v for k, v in checkpoints.items() if not k.startswith('round_2/')})
     (output / 'rl_complete.json').write_text(json.dumps({'steps': step, 'finished': time.time()}))

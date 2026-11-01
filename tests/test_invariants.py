@@ -531,3 +531,37 @@ def test_preservation_instructions_and_snapped_boxes_follow_the_graph():
     assert candidates[0]['sample']['preserve_nodes'] == ['on', 'cup'] and seen[0].box == pytest.approx((0.09, 0.09, 0.31, 0.31))
     from redag.harness.environment import preserved_phrases
     assert preserved_phrases(dag, ['on', 'near', 'cup'], 'dog') == ['cup', 'table', 'plate']
+
+
+def test_counterfactual_credit_and_expanded_stress_audit():
+    import json
+    from pathlib import Path
+    from scripts.build_stress_set import audit
+    nodes = {'cup': ConditionNode('cup', 'entity', 'Is there a cup?', 'cup', (0.1, 0.1, 0.5, 0.5), scope='local'),
+             'red': ConditionNode('red', 'attribute', 'Is the cup red?', 'cup', (0.1, 0.1, 0.5, 0.5), scope='local', depends_on=['cup'])}
+    dag = ConditionDAG(nodes, comp_edges=[('cup', 'red')])
+    parent = CanvasState(torch.zeros(3, 16, 16), {'cup': 0.9, 'red': 0.2}, {'cup'})
+    # Case 1: rejected because protected 'cup' drops from 0.9 to 0.5 (even though 'red' rises to 0.8)
+    verifier = TwoStageVerifier(lambda image, question: 0.5 if 'Is there a cup' in question else 0.8)
+    harness = ReDAGHarness(verifier, None)
+    action = ControllerAction('modify_attr', (0.1, 0.1, 0.5, 0.5), 'Make it red.')
+    delivered, default_reward, accepted, _ = harness.evaluate_candidate_action(parent, dag, 'red', action, torch.ones(3, 8, 8))
+    assert not accepted and default_reward == pytest.approx(-0.01) and delivered.scores == parent.scores
+    harness.counterfactual_credit = True
+    harness.acceptance_bonus = 0.05
+    delivered_cf, cf_reward, accepted_cf, _ = harness.evaluate_candidate_action(parent, dag, 'red', action, torch.ones(3, 8, 8))
+    # raw utility: (+0.6 on red, -0.4 * 2.5 = -1.0 on protected cup) / 2 - 0.01 = -0.21, while canvas still rolls back
+    assert not accepted_cf and delivered_cf.scores == parent.scores and cf_reward == pytest.approx((0.6 - 1.0) / 2.0 - 0.01)
+    # Case 2: accepted edit gets +acceptance_bonus
+    verifier_ok = TwoStageVerifier(lambda image, question: 0.9 if 'Is there a cup' in question else 0.85)
+    harness_ok = ReDAGHarness(verifier_ok, None)
+    harness_ok.counterfactual_credit = True
+    harness_ok.acceptance_bonus = 0.05
+    _, ok_reward, ok_acc, _ = harness_ok.evaluate_candidate_action(parent, dag, 'red', action, torch.ones(3, 8, 8))
+    assert ok_acc and ok_reward == pytest.approx((0.65 / 2.0) - 0.01 + 0.05)
+    # Check expanded stress set if present
+    expanded = Path('data/final/eval_stress_expanded.jsonl')
+    if expanded.exists():
+        rows = [json.loads(line) for line in expanded.read_text(encoding='utf-8').splitlines() if line.strip()]
+        assert len(rows) >= 300
+        assert all(not audit(r)[3] for r in rows)
