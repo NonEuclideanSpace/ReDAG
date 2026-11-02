@@ -11,7 +11,8 @@ ROUTE_FEATURES = ('bias',) + tuple('type=' + t for t in NODE_TYPES) + tuple('cla
 ACCEPT_FEATURES = ('bias', 'drops', 'drops_this_turn', 'drops_earlier_turns', 'drop_descendants', 'repairable_drops', 'single_repairable_drop',
                    'targets_hit', 'mean_gain', 'route_turn', 'last_turn', 'budget_left')
 RETRY_FEATURES = ('bias', 'undrawn_share', 'damaged', 'budget_left', 'last_turn', 'attempts')
-SCHEMA = dict(route=ROUTE_FEATURES, accept=ACCEPT_FEATURES, retry=RETRY_FEATURES)
+TURN_FEATURES = ('bias', 'canvas', 'at_risk', 'canvas_at_risk', 'target_share', 'last_turn', 'budget_left')
+SCHEMA = dict(route=ROUTE_FEATURES, accept=ACCEPT_FEATURES, retry=RETRY_FEATURES, turn=TURN_FEATURES)
 
 
 def default_weights():
@@ -24,7 +25,10 @@ def default_weights():
     accept.update(bias=-2.0, drops=-1.5, drop_descendants=-1.0, single_repairable_drop=2.0)
     retry = {name: 0.0 for name in RETRY_FEATURES}
     retry.update(bias=1.0)
-    return {'route': [route[n] for n in ROUTE_FEATURES], 'accept': [accept[n] for n in ACCEPT_FEATURES], 'retry': [retry[n] for n in RETRY_FEATURES]}
+    turn = {name: 0.0 for name in TURN_FEATURES}
+    turn.update(bias=1.5)
+    return {'route': [route[n] for n in ROUTE_FEATURES], 'accept': [accept[n] for n in ACCEPT_FEATURES], 'retry': [retry[n] for n in RETRY_FEATURES],
+            'turn': [turn[n] for n in TURN_FEATURES]}
 
 
 def sigmoid(z):
