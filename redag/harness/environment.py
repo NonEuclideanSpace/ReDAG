@@ -521,7 +521,7 @@ class ReDAGHarness:
                     sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, with_user_request(sample['action'].instruction, snippet))
                 sample['route'] = route
                 mask = None if route == 'global' else self.editable_mask(state, graph, target_node_id, sample['action'])
-                crop, editable = self.render(editor, state, sample['action'], seed + index, mask)
+                crop, editable = self.render(editor, state, sample['action'], seed, mask)
                 try:
                     self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop, editable, route=route)
                 except RuntimeError as error:
