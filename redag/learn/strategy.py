@@ -50,7 +50,7 @@ class StrategyPolicy:
         return bool(action)
 
 
-def policy_gradient(weights, rollouts, lr=0.5, prior=None, l2=0.05, clip=8.0):
+def policy_gradient(weights, rollouts, lr=0.5, prior=None, l2=0.05, clip=16.0):
     grads = {kind: [0.0] * len(weights[kind]) for kind in weights}
     count = 0
     for rollout in rollouts:
