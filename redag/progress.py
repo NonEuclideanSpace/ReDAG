@@ -1,9 +1,3 @@
-"""Progress reports for the job scheduler (scripts/launch/pipeline.py).
-
-A job started by the scheduler receives REDAG_PROGRESS_FILE.  report(done, total, unit) writes
-{done, total, unit, time} there atomically, at most every few seconds, so `go.sh status` can show progress and an
-ETA.  Outside the scheduler (variable unset) it does nothing.
-"""
 import json
 import os
 import time

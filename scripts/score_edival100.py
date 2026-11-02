@@ -63,9 +63,9 @@ def main():
                     continue
                 idx = int(row['key'].split('|')[2])
                 case = row['case']
-                fin_view = case['views'][case['final']]
+                fin_path = row.get('final_image') or case['views'][case['final']]['image']
                 src_img = load_image(records[idx]['image'])
-                fin_img = load_image(fin_view['image'])
+                fin_img = load_image(fin_path)
                 l1_list.append(compute_outside_l1_consistency(src_img, fin_img, case.get('steps', [])))
         if l1_list:
             print(f'ReDAG Unchanged-Region L1 Consistency (n={len(l1_list)}): {sum(l1_list)/len(l1_list)*100:.2f}%')

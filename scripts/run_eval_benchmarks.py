@@ -19,10 +19,6 @@ STAGES = ('zero_shot', 'sft', 'ctrl_rl', 'edit_rl', 'alternating_rl')
 
 
 class CaseCache:
-    """Append-only <output>.cases.jsonl: one line per finished session, so a stopped evaluation resumes where it was.
-
-    The first line records the settings; a cache written with different settings is refused rather than mixed in.
-    """
     def __init__(self, path, fingerprint):
         self.path, self.rows = Path(path), {}
         fingerprint = self.fingerprint = json.loads(json.dumps(fingerprint))
@@ -38,7 +34,7 @@ class CaseCache:
                     self.rows[row['key']] = row
                     kept.append(line)
                 except (ValueError, KeyError, TypeError):
-                    continue  # a line cut off by a crash
+                    continue
             self.path.write_text(''.join(line + '\n' for line in kept), encoding='utf-8')
         else:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,9 +56,6 @@ class CaseCache:
 
 
 def reusable_sessions(path, fingerprint, stages):
-    """{(stage, index, 0): experiment-1 row} for experiment-1 redag_full sessions that are exactly this run's seed-0 sessions:
-    same data, shard, seed, step and call budgets, sampling steps, models, and the stage's adapters equal to the fixed
-    weights experiment 1 used.  Anything else (or a missing file) reuses nothing."""
     path = Path(path)
     if not path.exists() or not fingerprint:
         return {}
@@ -121,7 +114,9 @@ def export_case(state, dag, trace, folder, identifier, group, budget, config):
         if step.get('sample', {}).get('preserve_nodes'):
             steps[-1].update(preserve_nodes=list(step['sample']['preserve_nodes']), instruction=step['action'].instruction)
         if 'controller_box' in step.get('sample', {}):
-            steps[-1].update(controller_box=list(step['sample']['controller_box']), box=list(step['action'].box))
+            steps[-1].update(controller_box=list(step['sample']['controller_box']))
+        steps[-1].update(route=step.get('route', 'local'), box=list(step['action'].box), instruction=step['action'].instruction,
+                         targets=list(step.get('targets') or [step['target_node_id']]), verifier_calls=step.get('verifier_calls'))
     return {'id': identifier, 'group': group, 'views': views, 'final': final['id'], 'steps': steps, 'execution': dict(budget), 'min_gain': config.min_target_gain, 'max_drop': config.max_protected_drop}
 
 
@@ -143,6 +138,8 @@ def main():
     parser.add_argument('--stages', nargs='+', choices=STAGES, help='experiment 3: run only these stages (merge parts with scripts/merge_eval_results.py)')
     parser.add_argument('--shard', type=int, default=0, help='run records with index %% num_shards == shard')
     parser.add_argument('--num_shards', type=int, default=1)
+    parser.add_argument('--only_kinds', default='')
+    parser.add_argument('--only_k', default='')
     parser.add_argument('--reuse_cases', help="experiment 3: an experiment-1 <output>.cases.jsonl of the same shard; its redag_full "
                         "sessions are this stage's seed-0 sessions when weights, data, budgets and seed are identical")
     args = parser.parse_args()
@@ -165,8 +162,6 @@ def main():
             if not args.stage_checkpoints:
                 parser.error('Experiment 3 requires --stage_checkpoints')
             stages = json.loads(Path(args.stage_checkpoints).read_text())
-            # all five stages are required unless --stages selects some (then the file may list only those, e.g. the
-            # pre-RL stages while RL is still training); merge_eval_results.py checks that every stage is present
             wanted = [k for k in STAGES if k in (args.stages or STAGES)]
             if (not args.stages and set(stages) != set(STAGES)) or any(k not in stages for k in wanted) \
                     or any(set(stages[k]) != {'controller', 'editor'} for k in wanted):
@@ -196,12 +191,14 @@ def main():
             for idx in mine_set:
                 for turn in records[idx].get('turns', []):
                     if isinstance(turn, dict):
+                        turn['_fallback_graph'] = turn.get('graph', turn.get('dag'))
                         turn.pop('graph', None)
                         turn.pop('dag', None)
         if any(isinstance(turn, str) or ('graph' not in turn and 'dag' not in turn) for r in records for turn in r.get('turns', [])):
             device = args.planner_device or args.device
             planner = Planner.from_pretrained(args.planner_model, device, torch.float32 if device == 'cpu' else torch.bfloat16, args.planner_adapter)
-            for record in records:
+            planner.max_new_tokens = max(planner.max_new_tokens, 768)
+            for rec_i, record in enumerate(records):
                 previous = None
                 for index, turn in enumerate(record.get('turns', [])):
                     turn = {'user_prompt': turn} if isinstance(turn, str) else dict(turn)
@@ -211,8 +208,18 @@ def main():
                         graph = preserve_previous_conditions(raw, previous, explicit)
                         turn['superseded_ids'] = explicit if explicit is not None else raw.get('superseded_ids', [])
                     else:
-                        graph = planner.plan(turn['user_prompt'], previous, superseded_ids=explicit)
-                        turn['superseded_ids'] = list(planner.last_superseded_ids)
+                        try:
+                            graph = planner.plan(turn['user_prompt'], previous, superseded_ids=explicit)
+                            turn['superseded_ids'] = list(planner.last_superseded_ids)
+                            print(f'[online_planner] rec={rec_i} turn={index} nodes={len(graph.nodes)} ok', flush=True)
+                        except Exception as exc:
+                            raw = turn.get('_fallback_graph')
+                            if raw is None:
+                                raise
+                            print(f'[online_planner] rec={rec_i} turn={index} fallback due to {exc}', flush=True)
+                            graph = preserve_previous_conditions(raw, previous, explicit)
+                            turn['superseded_ids'] = explicit if explicit is not None else raw.get('superseded_ids', [])
+                    turn.pop('_fallback_graph', None)
                     turn['graph'], previous = graph, graph
                     record['turns'][index] = turn
             del planner
@@ -225,14 +232,24 @@ def main():
         modes = tuple(args.exp1_modes) if args.exp_id == 1 else ('redag_full',)
         seeds = tuple(range(3)) if args.exp_id == 3 else (0,)
         mine = [index for index in range(len(records)) if index % args.num_shards == args.shard]
+        kinds = {k for k in args.only_kinds.split(',') if k}
+        tiers = {int(k) for k in args.only_k.split(',') if k}
+        if kinds or tiers:
+            mine = [i for i in mine if (not kinds or records[i].get('kind') in kinds) and (not tiers or records[i].get('k') in tiers)]
         fingerprint = dict(
             exp_id=args.exp_id, data=str(Path(args.data).resolve()), records=len(records), shard=args.shard, num_shards=args.num_shards,
             stages=stages, modes=modes, seed=args.seed, max_steps=args.max_steps, budgets=[args.verification_budget, args.generation_budget] + ([args.cost_budget, args.generation_cost] if args.cost_budget else []) + (['per_turn'] if args.budget_per_turn else []),
             num_denoise_steps=args.num_denoise_steps, models=[args.controller_model, args.editor_model, args.verifier_model,
                                                              args.detector_model, args.sam_model])
-        variant = [flag for flag in ('closure_instructions', 'confirm_drops', 'soft_gating', 'preserve_instructions', 'dag_box', 'online_planner') if getattr(args, flag, False)] + (['strong_edges'] if getattr(args, 'edge_policy', 'full') == 'strong' else []) + ([f'context_pad_{args.editor_context_pad:g}'] if getattr(args, 'editor_context_pad', 0.0) > 0 else [])
+        variant = [flag for flag in ('closure_instructions', 'confirm_drops', 'soft_gating', 'preserve_instructions', 'dag_box', 'online_planner', 'user_text') if getattr(args, flag, False)] + (['strong_edges'] if getattr(args, 'edge_policy', 'full') == 'strong' else []) + ([f'context_pad_{args.editor_context_pad:g}'] if getattr(args, 'editor_context_pad', 0.0) > 0 else [])
+        if getattr(args, 'scope_routing', False):
+            variant.append(f'scope_routing_{args.global_gate}_' + '+'.join(sorted(t for t in args.global_types.split(',') if t)))
+        if getattr(args, 'turn_pass', False):
+            variant.append(f'turn_pass_{args.turn_gate}')
         if variant:
             fingerprint['variant'] = variant
+        if kinds or tiers:
+            fingerprint['subset'] = [sorted(kinds), sorted(tiers)]
         cache = CaseCache(Path(args.output).with_suffix('.cases.jsonl'), fingerprint)
         reusable = reusable_sessions(args.reuse_cases, cache.fingerprint, stages) if args.reuse_cases and args.exp_id == 3 else {}
         provenance = dict(code=code_revision(), editor=[args.editor_work_side or 0, bool(args.protect_masks)], **({'variant': variant} if variant else {}))
@@ -270,7 +287,7 @@ def main():
                             if key in cache:
                                 row = cache[key]
                             else:
-                                if runtime is None:  # models are loaded only when a stage still has sessions to run
+                                if runtime is None:
                                     runtime = load_runtime(args)
                                     runtime[0].verification_budget, runtime[0].generation_budget = args.verification_budget, args.generation_budget
                                     runtime[0].cost_budget, runtime[0].generation_cost, runtime[0].budget_per_turn = args.cost_budget or None, args.generation_cost, args.budget_per_turn
@@ -295,7 +312,7 @@ def main():
                             descriptions[index, seed] = row['description']
                     if not args.allow_small_dataset and not partial and any(counts[k] < (300 if args.exp_id == 3 else 100) for k in (10, 20, 30)):
                         raise ValueError('Each K tier requires 100 sessions, with three seeds for experiment 3')
-                runtime = harness = controller = editor = None  # free this stage's models before the next one loads
+                runtime = harness = controller = editor = None
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -303,7 +320,7 @@ def main():
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        if args.exp_id == 3 and partial:  # blind pairs are drawn after merging every part
+        if args.exp_id == 3 and partial:
             result['final_views'] = {f'{i}:{s}': images for (i, s), images in saved.items()}
             result['descriptions'] = {f'{i}:{s}': value for (i, s), value in descriptions.items()}
         elif args.exp_id == 3:

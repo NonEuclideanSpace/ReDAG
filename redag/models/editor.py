@@ -186,7 +186,6 @@ class FluxEditor:
             image = F.interpolate(image.float(), scale_factor=scale, mode="bilinear", align_corners=False)
         pad_h, pad_w = (-image.shape[-2]) % stride, (-image.shape[-1]) % stride
         if pad_h or pad_w:
-            # whole latent tokens only: decode_latents then crops instead of replicating missing border rows
             mode = "reflect" if pad_h < image.shape[-2] and pad_w < image.shape[-1] else "replicate"
             image = F.pad(image.float(), (0, pad_w, 0, pad_h), mode=mode)
         image = image.to(device=self.device, dtype=self.vae.dtype) * 2 - 1
@@ -228,8 +227,6 @@ class FluxEditor:
             mask = F.interpolate(mask, scale_factor=scale, mode="nearest")
         height, width = (size * stride for size in latent.shape[-2:])
         mask = F.pad(mask, (0, max(0, width - mask.shape[-1]), 0, max(0, height - mask.shape[-2])), mode="replicate")
-        # a latent token is editable when any pixel it covers is editable (nearest sampling kept only the
-        # top-left pixel of every 16 x 16 cell and could drop thin or off-grid masks entirely)
         mask = F.max_pool2d(mask[:, :, :height, :width], kernel_size=stride, stride=stride)
         if not mask.any():
             raise ValueError("The edit mask disappears at latent resolution")
@@ -314,3 +311,63 @@ class FluxEditor:
     def render(self, image, action, seed=42, mask=None):
         conditioning = None if mask is None else self.prepare(image, action, mask)
         return self.sample(image, action, seed=seed, conditioning=conditioning)["edited_crop"].to(image.device)
+
+
+class PipelineEditor:
+    def __init__(self, pipeline, num_steps=40, cfg_scale=4.0, context_pad=0.25):
+        self.pipeline = pipeline
+        self.num_steps, self.cfg_scale, self.context_pad, self.work_side = num_steps, cfg_scale, context_pad, None
+        self.pipeline.set_progress_bar_config(disable=True)
+
+    @classmethod
+    def from_pretrained(cls, model_id, device="cuda", dtype=torch.bfloat16, offload=False):
+        from diffusers import DiffusionPipeline
+        dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
+        pipeline = DiffusionPipeline.from_pretrained(model_id, torch_dtype=dtype)
+        if offload:
+            pipeline.enable_model_cpu_offload(device=device)
+        else:
+            pipeline = pipeline.to(device)
+        editor = cls(pipeline)
+        editor.target_device = torch.device(device)
+        return editor
+
+    @property
+    def device(self):
+        return getattr(self, "target_device", None) or self.pipeline.device
+
+    def lora_parameters(self):
+        return []
+
+    def eval(self):
+        return self
+
+    def train(self, mode=True):
+        return self
+
+    def _call(self, image, instruction, seed):
+        import inspect
+        accepted = set(inspect.signature(self.pipeline.__call__).parameters)
+        generator = torch.Generator(device="cpu").manual_seed(int(seed))
+        kwargs = dict(prompt=instruction, num_inference_steps=self.num_steps, generator=generator)
+        kwargs["image"] = [image] if "true_cfg_scale" in accepted else image
+        if "true_cfg_scale" in accepted:
+            kwargs.update(true_cfg_scale=self.cfg_scale, negative_prompt=" ")
+        elif "guidance_scale" in accepted:
+            kwargs["guidance_scale"] = self.cfg_scale
+        return self.pipeline(**{k: v for k, v in kwargs.items() if k in accepted}).images[0]
+
+    @torch.no_grad()
+    def render(self, image, action, seed=42, mask=None):
+        import numpy as np
+        from PIL import Image
+        height, width = image.shape[-2:]
+        x1, y1, x2, y2 = defnorm_box_to_pixel_slice(action.box, height, width)
+        pad_x, pad_y = round((x2 - x1) * self.context_pad), round((y2 - y1) * self.context_pad)
+        cx1, cy1, cx2, cy2 = max(0, x1 - pad_x), max(0, y1 - pad_y), min(width, x2 + pad_x), min(height, y2 + pad_y)
+        crop = image[:, cy1:cy2, cx1:cx2].detach().float().cpu().clamp(0, 1)
+        pil = Image.fromarray((crop.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8))
+        out = self._call(pil, action.instruction, seed).convert("RGB")
+        edited = torch.from_numpy(np.asarray(out, dtype=np.float32) / 255.0).permute(2, 0, 1)
+        edited = F.interpolate(edited.unsqueeze(0), size=(cy2 - cy1, cx2 - cx1), mode="bilinear", align_corners=False, antialias=True).squeeze(0)
+        return edited[:, y1 - cy1:y2 - cy1, x1 - cx1:x2 - cx1].clamp(0, 1).to(image.device)

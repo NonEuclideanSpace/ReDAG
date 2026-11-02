@@ -47,7 +47,6 @@ def read_records(path):
 
 
 def epoch_order(count, seed, epoch):
-    """Record order of one epoch: the shuffles of a single Random(seed) applied to a fresh index list every epoch."""
     import random
     rng, order = random.Random(seed), []
     for _ in range(epoch + 1):
@@ -58,12 +57,6 @@ def epoch_order(count, seed, epoch):
 
 def train_sft(model, records, output, kind, epochs=1, batch_size=1, learning_rate=None, seed=42, checkpoint_minutes=20,
               interrupt_after=None):
-    """Teacher-forced SFT (eq. 17 / 20 / 24), resumable.
-
-    Every checkpoint_minutes and at each epoch end the LoRA weights, optimizer, RNG states and data position are saved
-    to <output>/resume; rerunning the same command continues from there, and a finished run (sft_complete.json)
-    returns at once.  interrupt_after=N is a test hook: stop right after the checkpoint that follows step N.
-    """
     import json
     import time
     from pathlib import Path
@@ -183,7 +176,7 @@ def collect_controller_rs(records, harness, controller, editor, output, seed=42,
     images = output.parent / (output.stem + '_images')
     groups = output.with_suffix('.groups.jsonl')
     selected, done = 0, set()
-    if output.exists():  # resume: rows already written are kept; a line cut off by a crash is dropped
+    if output.exists():
         kept = []
         for line in output.read_text(encoding='utf-8').splitlines():
             try:
@@ -206,7 +199,7 @@ def collect_controller_rs(records, harness, controller, editor, output, seed=42,
                 continue
             size = group_size * (hard_multiplier if dag.nodes[frontier[0]].node_type in HARD_TARGET_TYPES else 1)
             candidates = harness.sample_group(state, dag, controller, editor, frontier[0], size, seed + index * group_size * max(1, hard_multiplier))
-            if not candidates:  # execution budget exhausted before any candidate was scored
+            if not candidates:
                 continue
             group_stream.write(json.dumps(dict(id=identifier, target_node_id=frontier[0], target_type=dag.nodes[frontier[0]].node_type,
                                                candidates=[dict(action=asdict(c['action']), reward=c['reward'], accepted=c['accepted']) for c in candidates]),

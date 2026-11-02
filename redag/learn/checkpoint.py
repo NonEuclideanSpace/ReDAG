@@ -1,10 +1,3 @@
-"""Atomic resume checkpoints for the long training loops (SFT, alternating RL).
-
-save() writes <folder>/resume through a temporary directory and renames, so a crash or a stopped instance at any
-moment leaves the previous or the new checkpoint intact, never a half-written one.  load() returns None when there
-is nothing to resume.  Only LoRA tensors, optimizer state, RNG states and small JSON progress are stored; the frozen
-base weights are reloaded from the model folders as usual.
-"""
 import json
 import random
 import shutil
@@ -34,7 +27,6 @@ def set_rng_state(state):
 
 
 def save(folder, state, tensors=None, optimizer=None, objects=None):
-    """state: JSON-serialisable progress; tensors: {name: {param_name: tensor}}; objects: other picklable values."""
     folder = Path(folder)
     final, tmp, old = (folder / name for name in _ORDER)
     shutil.rmtree(tmp, ignore_errors=True)
@@ -53,7 +45,6 @@ def save(folder, state, tensors=None, optimizer=None, objects=None):
 
 
 def load(folder):
-    """(state, payload) of the newest complete checkpoint in folder, or None."""
     folder = Path(folder)
     for name in _ORDER:
         path = folder / name
@@ -70,7 +61,6 @@ def clear(folder):
 
 
 def keep_jsonl_rows(path, keep):
-    """Rewrite an append-only JSONL log keeping the parsable rows for which keep(row) is true (atomic)."""
     path = Path(path)
     if not path.exists():
         return []
@@ -79,7 +69,7 @@ def keep_jsonl_rows(path, keep):
         try:
             row = json.loads(line)
         except ValueError:
-            continue  # a line cut off by a crash
+            continue
         if isinstance(row, dict) and keep(row):
             rows.append(row)
     tmp = path.with_name(path.name + '.tmp')
@@ -89,4 +79,4 @@ def keep_jsonl_rows(path, keep):
 
 
 class Interrupted(RuntimeError):
-    """Raised by the interrupt_after test hooks right after a checkpoint, to simulate a crash."""
+    pass

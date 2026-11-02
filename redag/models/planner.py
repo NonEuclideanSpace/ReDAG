@@ -64,9 +64,27 @@ def preserve_previous_conditions(value, previous_dag=None, superseded_ids=None):
     if not superseded <= previous.nodes.keys():
         raise ValueError("Superseded IDs must identify previous conditions")
     raw = value.get("nodes", [])
-    raw = [dict(node, node_id=nid) for nid, node in raw.items()] if isinstance(raw, dict) else raw
+    raw = [dict(node, node_id=nid) for nid, node in raw.items()] if isinstance(raw, dict) else [dict(node) for node in raw]
     if len({node["node_id"] for node in raw}) != len(raw):
         raise ValueError("Duplicate planned node ID")
+    remap = {}
+    prefix = f"t{len(previous.nodes)}_"
+    for node in raw:
+        nid = node["node_id"]
+        if nid in previous.nodes and nid not in superseded and previous.nodes[nid].question.strip() != node.get("question", "").strip():
+            new_id = prefix + nid
+            while new_id in previous.nodes or new_id in remap.values():
+                new_id = "_" + new_id
+            remap[nid] = new_id
+            node["node_id"] = new_id
+    if remap:
+        for node in raw:
+            if node.get("depends_on"):
+                node["depends_on"] = [remap.get(d, d) for d in node["depends_on"]]
+        value = dict(value)
+        for name in ("comp_edges", "supp_edges", "int_edges"):
+            if value.get(name):
+                value[name] = [(remap.get(u, u), remap.get(v, v)) for u, v in value[name]]
     nodes = {node["node_id"]: node for node in raw}
     nodes.update({nid: asdict(node) for nid, node in previous.nodes.items() if nid not in superseded})
     for nid, node in nodes.items():
@@ -131,12 +149,6 @@ LORA_PATTERN = (r".*language_model\.layers\.\d+\.(self_attn\.(q_proj|k_proj|v_pr
 
 
 def lora_target_modules(model):
-    """LoRA on every projection of every language-model layer.
-
-    Qwen3.5-family models interleave three Gated-DeltaNet (linear attention) layers with one full-attention
-    layer, so the usual q/k/v/o targets would adapt only a quarter of the decoder.  The regex covers both
-    layer kinds and the MLPs but never the vision tower or the LM head; unknown layouts fall back to q/k/v/o.
-    """
     pattern = re.compile(LORA_PATTERN)
     if any(isinstance(module, torch.nn.Linear) and pattern.fullmatch(name) for name, module in model.named_modules()):
         return LORA_PATTERN
