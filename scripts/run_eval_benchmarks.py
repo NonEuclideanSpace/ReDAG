@@ -248,6 +248,8 @@ def main():
             variant.append(f'turn_pass_{args.turn_gate}')
         if getattr(args, 'global_retries', 0):
             variant.append(f'global_retries_{args.global_retries}')
+        if getattr(args, 'strategy_policy', None):
+            variant.append('strategy_' + Path(args.strategy_policy).stem)
         if variant:
             fingerprint['variant'] = variant
         if kinds or tiers:
