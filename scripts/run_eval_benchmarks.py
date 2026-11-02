@@ -256,6 +256,8 @@ def main():
             variant.append(f'local_gate_{args.local_gate}')
         if getattr(args, 'turn_localize', False):
             variant.append('turn_localize')
+        if getattr(args, 'turn_protect', False):
+            variant.append('turn_protect')
         if getattr(args, 'strategy_policy', None):
             variant.append('strategy_' + Path(args.strategy_policy).stem)
         if variant:
