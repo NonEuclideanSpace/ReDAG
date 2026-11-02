@@ -287,12 +287,14 @@ def test_localized_turn_pass_edits_where_the_replaced_object_is():
 def test_protected_turn_pass_keeps_unrelated_satisfied_objects_out_of_the_edit():
     dag = ConditionDAG({'cat': node('cat', 'entity', 'Is there a cat?', 'cat', (0.0, 0.0, 0.5, 0.5)),
                         'cup': node('cup', 'entity', 'Is there a cup?', 'cup', (0.5, 0.0, 1.0, 0.5)),
+                        'table': node('table', 'entity', 'Is there a table?', 'table', (0.0, 0.35, 1.0, 1.0)),
                         'red': node('red', 'attribute', 'Is the cat red?', 'cat', depends_on=['cat']),
-                        'lamp': node('lamp', 'entity', 'Is there a lamp?', 'lamp', scope='global')})
-    masks = {name: torch.zeros(40, 40, dtype=torch.bool) for name in ('cat', 'cup')}
-    masks['cat'][2:10, 2:10], masks['cup'][2:10, 30:38] = True, True
+                        'lamp': node('lamp', 'entity', 'Is there a lamp?', 'lamp', scope='global'),
+                        'sky': node('sky', 'background', 'Is the sky dark?', 'sky', scope='global')})
+    masks = {name: torch.zeros(40, 40, dtype=torch.bool) for name in ('cat', 'cup', 'table')}
+    masks['cat'][2:10, 2:10], masks['cup'][2:10, 30:38], masks['table'][15:40, :] = True, True, True
     grounder = SimpleNamespace(counts={}, masks=masks, ground=lambda image, graph, selected=None: graph)
-    state = CanvasState(torch.zeros(3, 40, 40), {'cat': 0.9, 'cup': 0.9, 'red': 0.1, 'lamp': 0.1}, {'cat', 'cup'})
+    state = CanvasState(torch.zeros(3, 40, 40), {'cat': 0.9, 'cup': 0.9, 'table': 0.9, 'red': 0.1, 'lamp': 0.1, 'sky': 0.1}, {'cat', 'cup', 'table'})
     harness = configure_routing(ReDAGHarness(TwoStageVerifier(lambda image, question: 0.9), grounder, feather_px=0), SimpleNamespace(turn_pass=True))
     harness.mask_margin, harness.min_editable_pixels = 2, 10
     action = ControllerAction('modify_attr', CANVAS, 'Make the cat red and add a lamp.')
@@ -300,6 +302,7 @@ def test_protected_turn_pass_keeps_unrelated_satisfied_objects_out_of_the_edit()
     harness.turn_protect = True
     mask = harness.turn_mask(state, dag, ['red', 'lamp'], action)
     assert mask[5, 33] == 0 and mask[5, 5] == 1 and mask[30, 20] == 1
+    assert harness.turn_mask(state, dag, ['sky', 'lamp'], action) is None
     seen = []
 
     def render(image, act, seed=42, mask=None):

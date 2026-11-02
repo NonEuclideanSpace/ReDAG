@@ -512,6 +512,8 @@ class ReDAGHarness:
     def turn_mask(self, state, dag, targets, action):
         if not self.turn_protect or self.grounder is None or self.mode != 'redag_full':
             return None
+        if any(route_class(dag, t) in ('background', 'global') for t in targets):
+            return None
         free = set(targets) | {p for t in targets for p in condition_parents(dag, t)}
         free |= get_int_neighbors(dag, free)
         phrases = {dag.nodes[t].entity_phrase for t in targets if dag.nodes[t].node_type in ('count', 'prohibition')}
@@ -524,6 +526,8 @@ class ReDAGHarness:
                 keep.add(nid)
             elif dag.nodes[nid].node_type == 'attribute':
                 keep.update(p for p in condition_parents(dag, nid) if dag.nodes[p].node_type == 'entity' and p not in free)
+        height, width = state.image.shape[-2:]
+        keep = {nid for nid in keep if nid in self.grounder.masks and float(self.grounder.masks[nid].float().sum()) <= self.container_share * height * width}
         return self.editable_from(state, keep, action.box)
 
     def editable_from(self, state, keep, box):
