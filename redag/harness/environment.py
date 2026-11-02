@@ -809,7 +809,7 @@ def validate_dataset(records, experiment, diagnostic, require_graphs=False):
         if graph is None:
             unplanned += 1
             continue
-        counts[len(graph.nodes)] += 1
+        counts[record.get('k', len(graph.nodes)) if record.get('revisions') else len(graph.nodes)] += 1
     if unplanned:
         if require_graphs:
             raise ValueError(f'{unplanned} sessions still have turns without a condition graph')
