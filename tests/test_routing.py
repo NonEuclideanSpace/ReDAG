@@ -2,7 +2,7 @@ from types import SimpleNamespace
 import torch
 from redag.graph.dag import CANVAS
 from redag.graph.schema import CanvasState, ConditionDAG, ConditionNode, ControllerAction
-from redag.harness.environment import (ReDAGHarness, configure_routing, joint_acceptance, request_snippet, route_class,
+from redag.harness.environment import (ReDAGHarness, configure_routing, consistent_count, joint_acceptance, request_snippet, route_class,
                                        run_record, with_user_request)
 from redag.verify.verifier import TwoStageVerifier
 
@@ -62,6 +62,40 @@ def test_joint_gate_requires_gain_target_and_protected_floor():
     assert joint_acceptance(dag, ['b'], prev, hurt, {'a', 'c'}, {'a', 'b', 'c'}, gate='mean')
     assert not joint_acceptance(dag, ['b'], prev, dict(prev, b=0.12), {'a', 'c'}, {'a', 'b', 'c'}, gate='mean')
     assert not joint_acceptance(dag, ['b'], prev, {'a': 0.2, 'b': 0.9, 'c': 0.2}, {'a', 'c'}, {'a', 'b', 'c'}, gate='mean')
+
+
+def test_net_gate_counts_dependency_consistent_conditions():
+    dag = ConditionDAG({'a': node('a', 'entity', 'a', 'a'), 'b': node('b', 'attribute', 'b', 'a', depends_on=['a']), 'c': node('c', 'entity', 'c', 'c')})
+    prev = {'a': 0.9, 'b': 0.9, 'c': 0.1}
+    nodes = {'a', 'b', 'c'}
+    trade = {'a': 0.9, 'b': 0.5, 'c': 0.9}
+    assert not joint_acceptance(dag, ['c'], prev, trade, {'a', 'b'}, nodes)
+    assert joint_acceptance(dag, ['c'], prev, trade, {'a', 'b'}, nodes, gate='mean')
+    assert not joint_acceptance(dag, ['c'], prev, trade, {'a', 'b'}, nodes, gate='net')
+    assert joint_acceptance(dag, ['c'], prev, {'a': 0.9, 'b': 0.9, 'c': 0.9}, {'a', 'b'}, nodes, gate='net')
+    assert not joint_acceptance(dag, ['c'], prev, {'a': 0.6, 'b': 0.95, 'c': 0.95}, {'a', 'b'}, nodes, gate='net')
+    assert consistent_count(dag, {'a': 0.6, 'b': 0.95, 'c': 0.95}, nodes) == 1
+    prev2 = {'a': 0.9, 'b': 0.9, 'c': 0.1, 'd': 0.1}
+    dag2 = ConditionDAG({**dag.nodes, 'd': node('d', 'entity', 'd', 'd')})
+    assert joint_acceptance(dag2, ['c', 'd'], prev2, {'a': 0.9, 'b': 0.5, 'c': 0.9, 'd': 0.9}, {'a', 'b'}, {'a', 'b', 'c', 'd'}, gate='net')
+
+
+def test_global_retries_fall_back_to_the_local_route_within_a_turn():
+    dag = ConditionDAG({'sky': node('sky', 'background', 'Is the sky at sunset?', 'sky', scope='global')})
+    harness = configure_routing(ReDAGHarness(TwoStageVerifier(lambda image, question: 0.1), None),
+                                SimpleNamespace(scope_routing=True, global_types='background', global_retries=1))
+    state = CanvasState(torch.zeros(3, 16, 16), {'sky': 0.1}, set())
+    editor = SimpleNamespace(render=lambda image, act, seed=42: torch.ones(3, 16, 16))
+    controller = SimpleNamespace(sample=lambda *args, **kwargs: {'action': ControllerAction('modify_attr', (0.0, 0.0, 1.0, 0.5), 'Make the sky orange.')})
+    harness.turn_request = 'make it a sunset'
+    first = harness.sample_group(state, dag, controller, editor, 'sky', group_size=1, seed=1)
+    second = harness.sample_group(state, dag, controller, editor, 'sky', group_size=1, seed=2)
+    assert first[0]['route'] == 'global' and not first[0]['accepted'] and second[0]['route'] == 'local'
+    harness.turn_index = 1
+    assert harness.routes_globally(dag, 'sky')
+    harness.global_retries = 0
+    harness.turn_index = 0
+    assert harness.routes_globally(dag, 'sky')
 
 
 def test_global_route_skips_the_controller_and_edits_the_whole_canvas():

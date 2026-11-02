@@ -99,6 +99,14 @@ def turn_instruction(request):
     return request + '. Keep everything else in the image unchanged.'
 
 
+def consistent_count(dag, scores, nodes):
+    parents = {nid: set(node.depends_on) for nid, node in dag.nodes.items()}
+    for u, v in dag.comp_edges + dag.supp_edges:
+        parents[v].add(u)
+    ok = lambda v: scores.get(v, 0.0) >= dag.nodes[v].threshold
+    return sum(1 for v in nodes if ok(v) and all(ok(p) for p in parents[v]))
+
+
 def joint_acceptance(dag, targets, prev_scores, new_scores, protected_set, affected, min_target_gain=0.05, gate='joint'):
     target_ok = any(new_scores[t] - prev_scores[t] >= min_target_gain or new_scores[t] >= dag.nodes[t].threshold for t in targets)
     gain = sum(dag.nodes[v].weight * (new_scores[v] - prev_scores[v]) for v in affected)
@@ -106,6 +114,8 @@ def joint_acceptance(dag, targets, prev_scores, new_scores, protected_set, affec
         return False
     if gate == 'mean':
         return True
+    if gate == 'net':
+        return consistent_count(dag, new_scores, affected) > consistent_count(dag, prev_scores, affected)
     return all(new_scores[v] >= dag.nodes[v].threshold for v in protected_set & affected)
 
 
@@ -129,8 +139,11 @@ class ReDAGHarness:
         self.scope_routing, self.global_types, self.global_gate = False, GLOBAL_ROUTE_TYPES, 'joint'
         self.user_text, self.turn_pass, self.turn_gate = False, False, 'joint'
         self.turn_request, self.turn_nodes, self.turn_index, self.draft_first_turn = '', set(), 0, False
+        self.global_retries, self.global_failures = 0, {}
 
     def routes_globally(self, dag, node_id):
+        if self.global_retries and self.global_failures.get((self.turn_index, node_id), 0) >= self.global_retries:
+            return False
         return self.scope_routing and self.mode == 'redag_full' and route_class(dag, node_id) in self.global_types
 
     def turn_targets(self, dag, state):
@@ -313,6 +326,9 @@ class ReDAGHarness:
         else:
             accepted = check_local_acceptance(graph, target_node_id, parent_state.scores, raw_scores, parent_state.protected_set, affected,
                                              self.config.min_target_gain, self.config.max_protected_drop)
+        if route == 'global' and not accepted:
+            key = (self.turn_index, target_node_id)
+            self.global_failures[key] = self.global_failures.get(key, 0) + 1
         delivered_image = candidate if accepted else parent_state.image
         delivered_scores = raw_scores if accepted else dict(parent_state.scores)
         reward_scores = raw_scores if self.counterfactual_credit else delivered_scores
@@ -566,6 +582,7 @@ def run_record(record, harness, controller, editor, max_steps=10, seed=42, group
         harness.verifier.call_limit = min(verification_limits, default=None)
         harness.render_limit = min(generation_limits, default=None)
     harness.turn_request, harness.turn_nodes, harness.turn_index = '', set(), 0
+    harness.global_failures = {}
     harness.draft_first_turn = record.get('kind') == 't2i'
     try:
         if 'turns' in record:
@@ -615,10 +632,11 @@ def add_runtime_arguments(parser):
     parser.add_argument('--editor_cfg', type=float)
     parser.add_argument('--scope_routing', action='store_true')
     parser.add_argument('--global_types', default=','.join(GLOBAL_ROUTE_TYPES))
-    parser.add_argument('--global_gate', choices=('joint', 'mean'), default='joint')
+    parser.add_argument('--global_gate', choices=('joint', 'mean', 'net'), default='joint')
+    parser.add_argument('--global_retries', type=int, default=0)
     parser.add_argument('--user_text', action='store_true')
     parser.add_argument('--turn_pass', action='store_true')
-    parser.add_argument('--turn_gate', choices=('joint', 'mean'), default='joint')
+    parser.add_argument('--turn_gate', choices=('joint', 'mean', 'net'), default='joint')
     return parser
 
 
@@ -661,6 +679,7 @@ def configure_routing(harness, args):
         raise ValueError(f'Unknown global route types: {sorted(unknown)}')
     harness.global_types = types
     harness.global_gate = getattr(args, 'global_gate', 'joint')
+    harness.global_retries = int(getattr(args, 'global_retries', 0) or 0)
     harness.user_text = bool(getattr(args, 'user_text', False))
     harness.turn_pass = bool(getattr(args, 'turn_pass', False))
     harness.turn_gate = getattr(args, 'turn_gate', 'joint')

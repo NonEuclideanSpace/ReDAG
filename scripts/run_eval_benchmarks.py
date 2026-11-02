@@ -246,6 +246,8 @@ def main():
             variant.append(f'scope_routing_{args.global_gate}_' + '+'.join(sorted(t for t in args.global_types.split(',') if t)))
         if getattr(args, 'turn_pass', False):
             variant.append(f'turn_pass_{args.turn_gate}')
+        if getattr(args, 'global_retries', 0):
+            variant.append(f'global_retries_{args.global_retries}')
         if variant:
             fingerprint['variant'] = variant
         if kinds or tiers:
