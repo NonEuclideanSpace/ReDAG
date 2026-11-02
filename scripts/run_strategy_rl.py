@@ -32,6 +32,26 @@ def read_jsonl(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
 
 
+def read_jsonl_required(path):
+    rows = read_jsonl(path)
+    if not rows:
+        raise SystemExit(f'Required input is missing or empty: {path}')
+    return rows
+
+
+def select_sessions(records, per_stratum, seed):
+    strata = {}
+    for record in records:
+        if record['kind'] == 't2i' and len(record.get('turns') or []) < 2:
+            continue
+        strata.setdefault((record['kind'], record['k']), []).append(record)
+    order = lambda r: hashlib.sha1(f"{seed}:{r['id']}".encode()).hexdigest()
+    picked = [sorted(group, key=order)[:per_stratum] for _, group in sorted(strata.items())]
+    for (kind, k), group in zip(sorted(strata), picked):
+        print(f'stratum {kind} K{k}: {len(group)} of {per_stratum}', flush=True)
+    return [group[i] for i in range(max(map(len, picked), default=0)) for group in picked if i < len(group)]
+
+
 def runtime(args):
     harness, controller, editor = load_runtime(args)
     harness.verification_budget, harness.generation_budget, harness.budget_per_turn = args.verification_budget, args.generation_budget, True
@@ -50,7 +70,9 @@ def bank(args):
     images = out.parent / (out.stem + '_images')
     images.mkdir(exist_ok=True)
     done = {row['session_id'] for row in read_jsonl(out)}
-    records = shard(read_records(args.data)[:args.limit or None], args)
+    records = read_records(args.data)
+    records = select_sessions(records, args.per_stratum, args.seed) if args.per_stratum else records[:args.limit or None]
+    records = shard(records, args)
     with out.open('a') as stream:
         for record in records:
             if record['id'] in done:
@@ -86,7 +108,7 @@ def rollout(args):
     harness, controller, editor = runtime(args)
     policy = StrategyPolicy.load(args.policy, sample=not args.greedy)
     harness.strategy = policy
-    states = [s for s in read_jsonl(args.states) if not s.get('empty') and s.get('split', 'train') == args.split]
+    states = [s for s in read_jsonl_required(args.states) if not s.get('empty') and s.get('split', 'train') == args.split]
     random.Random(f'{args.seed}:{args.epoch}').shuffle(states)
     states = shard(states[:args.states_per_epoch or None], args)
     branches = 1 if args.greedy else args.branches
@@ -148,7 +170,9 @@ def summarize(rollouts):
 
 
 def learn(args):
-    rollouts = group_advantages([r for path in args.rollouts for r in read_jsonl(path)])
+    rollouts = group_advantages([r for path in args.rollouts for r in read_jsonl_required(path)])
+    if not any(r['advantage'] for r in rollouts):
+        raise SystemExit('no_learning_signal: every rollout group has identical rewards')
     policy = StrategyPolicy.load(args.policy)
     prior = json.loads(Path(args.prior).read_text())['weights'] if args.prior else default_weights()
     weights = policy_gradient(policy.weights, rollouts, lr=args.lr, prior=prior, l2=args.l2)
@@ -181,6 +205,7 @@ def main():
     parser.add_argument('--l2', type=float, default=0.05)
     parser.add_argument('--dev_share', type=float, default=0.2)
     parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument('--per_stratum', type=int, default=0)
     parser.add_argument('--shard', type=int, default=0)
     parser.add_argument('--num_shards', type=int, default=1)
     parser.add_argument('--max_steps', type=int, default=3)
