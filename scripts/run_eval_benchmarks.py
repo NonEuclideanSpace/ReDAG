@@ -254,6 +254,8 @@ def main():
             variant.append('turn_priority')
         if getattr(args, 'local_gate', 'legacy') != 'legacy':
             variant.append(f'local_gate_{args.local_gate}')
+        if getattr(args, 'turn_localize', False):
+            variant.append('turn_localize')
         if getattr(args, 'strategy_policy', None):
             variant.append('strategy_' + Path(args.strategy_policy).stem)
         if variant:

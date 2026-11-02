@@ -258,3 +258,21 @@ def test_affected_set_closes_over_children_of_count_and_prohibition_nodes():
                         'kid': node('kid', 'relation', 'Is a kid next to the two dogs?', 'kid', scope='global', depends_on=['two'])})
     affected = compute_affected_subgraph(dag, ControllerAction('modify_attr', (0.1, 0.1, 0.4, 0.4), 'Edit the dog.'), 'dog')
     assert {'dog', 'two', 'kid'} <= affected
+
+
+def test_localized_turn_pass_bounds_a_prohibition_by_where_the_object_is():
+    from redag.verify.grounder import Grounder
+    dag = ConditionDAG({'no': node('no', 'prohibition', 'Is the image free of carrots?', 'carrot', scope='global'),
+                        'new': node('new', 'entity', 'Is there broccoli?', 'broccoli', (0.1, 0.4, 0.3, 0.6)),
+                        'sky': node('sky', 'background', 'Is the sky blue?', 'sky', scope='global')})
+    image, found = torch.zeros(3, 16, 16), {'carrot': [[3.2, 8.0, 6.4, 11.2], [3.2, 8.0, 6.4, 11.3], [10, 10, 9, 12]]}
+    grounder = Grounder(lambda img, phrase: found.get(phrase, []))
+    assert grounder.locate(image, 'carrot') == [(0.2, 0.5, 0.4, 0.7)]
+    harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.5), grounder)
+    assert harness.turn_box(dag, ['no', 'new'], image) == CANVAS
+    harness = configure_routing(harness, SimpleNamespace(turn_localize=True))
+    box = harness.turn_box(dag, ['no', 'new'], image)
+    assert [round(x, 4) for x in box] == [0.0625, 0.3625, 0.4375, 0.7375]
+    assert harness.turn_box(dag, ['sky', 'new'], image) == CANVAS
+    found['carrot'] = []
+    assert harness.turn_box(dag, ['no', 'new'], image) == CANVAS
