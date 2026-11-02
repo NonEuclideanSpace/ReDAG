@@ -304,7 +304,7 @@ def main():
                                 harness, controller, editor = runtime
                                 harness.mode = mode
                                 state, dag, trace = run_record(record, harness, controller, editor, args.max_steps, args.seed + seed, planner=planner)
-                                k = len(dag.nodes)
+                                k = record.get('k', len(dag.nodes)) if record.get('revisions') else len(dag.nodes)
                                 if not args.allow_small_dataset and k not in (10, 20, 30):
                                     raise ValueError('Main evaluations require final K=10/20/30')
                                 case = export_case(state, dag, trace, folder, identifier, f'{stage}/{mode}/{k}', harness.last_run, harness.config)
