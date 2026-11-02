@@ -14,6 +14,10 @@ from redag.verify.verifier import expand_bbox_with_margin
 BASELINE_MODES = ('flat_full', 'tree_rollback_only')
 
 
+def union_box(boxes):
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
 def requirement_statement(node):
     text, phrase = node.question.strip().rstrip('?').strip(), node.entity_phrase.strip()
     lower = text.lower()
@@ -228,7 +232,7 @@ class ReDAGHarness:
 
     def turn_features(self, state, dag, targets):
         at_risk = min(1.0, sum(1 for n in dag.nodes if n not in targets and state.scores.get(n, 0.0) >= dag.nodes[n].threshold) / 30.0)
-        canvas = float(self.turn_box(dag, targets, state.image) == CANVAS)
+        canvas = float(self.turn_box(dag, targets, state.image, state.scores) == CANVAS)
         return [1.0, canvas, at_risk, canvas * at_risk, len(targets) / max(1, len(dag.nodes)), float(self.turn_index >= self.turn_count - 1), self.budget_left()]
 
     def routes_globally(self, dag, node_id):
@@ -243,19 +247,41 @@ class ReDAGHarness:
             return []
         return [nid for nid in dag.nodes if nid in self.turn_nodes and state.scores.get(nid, 0.0) < dag.nodes[nid].threshold]
 
-    def turn_footprint(self, dag, node_id, image=None):
+    def turn_footprint(self, dag, node_id, scores, located, seen=()):
         node = dag.nodes[node_id]
-        if self.turn_localize and node.node_type == 'prohibition' and node.entity_phrase.strip() and self.grounder is not None and image is not None:
-            found = self.grounder.locate(image, node.entity_phrase)
-            return (min(b[0] for b in found), min(b[1] for b in found), max(b[2] for b in found), max(b[3] for b in found)) if found else None
+        if not self.turn_localize:
+            return edit_footprint(dag, node_id)
+        if node.node_type == 'prohibition':
+            return located.get(node_id)
+        owners = [p for p in condition_parents(dag, node_id) if dag.nodes[p].node_type == 'entity' and p not in seen]
+        if node.node_type == 'entity' and scores.get(node_id, 0.0) < node.threshold:
+            placed = [dag.nodes[p].bbox for p in owners if dag.nodes[p].bbox is not None and scores.get(p, 0.0) >= dag.nodes[p].threshold]
+            if placed:
+                return union_box(placed)
+            return () if any(b is not None for b in located.values()) else None
+        if node.node_type in ('attribute', 'relation') and owners:
+            parts = [self.turn_footprint(dag, p, scores, located, seen + (node_id,)) for p in owners]
+            if any(b is None for b in parts):
+                return None
+            parts = [b for b in parts if b]
+            return union_box(parts) if parts else ()
         return edit_footprint(dag, node_id)
 
-    def turn_box(self, dag, targets, image=None):
-        boxes = [self.turn_footprint(dag, nid, image) for nid in targets]
-        if any(b is None or box_area(b) >= WHOLE_CANVAS_SHARE for b in boxes):
+    def turn_box(self, dag, targets, image=None, scores=None):
+        located = {}
+        if self.turn_localize and self.grounder is not None and image is not None:
+            for nid in targets:
+                node = dag.nodes[nid]
+                if node.node_type == 'prohibition' and node.entity_phrase.strip():
+                    found = self.grounder.locate(image, node.entity_phrase)
+                    located[nid] = union_box(found) if found else None
+        boxes = [self.turn_footprint(dag, nid, scores or {}, located) for nid in targets]
+        if any(b is None for b in boxes):
             return CANVAS
-        union = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
-        union = expand_bbox_with_margin(union, 1.25)
+        boxes = [b for b in boxes if b]
+        if not boxes or any(box_area(b) >= WHOLE_CANVAS_SHARE for b in boxes):
+            return CANVAS
+        union = expand_bbox_with_margin(union_box(boxes), 1.25)
         return CANVAS if box_area(union) >= WHOLE_CANVAS_SHARE else union
 
     def turn_retry_source(self, records):
@@ -286,7 +312,7 @@ class ReDAGHarness:
             undrawn = [n for n in targets if seen.get(n, 0.0) < graph.nodes[n].threshold]
             dropped = sorted(n for n in previous['parent_state'].protected_set if n in graph.nodes and seen.get(n, 1.0) < graph.nodes[n].threshold)
             instruction = retry_instruction(self.turn_request, graph, undrawn, dropped)
-        action = ControllerAction('modify_attr', self.turn_box(graph, targets, state.image), instruction)
+        action = ControllerAction('modify_attr', self.turn_box(graph, targets, state.image, state.scores), instruction)
         self.generation_counter += 1
         crop = editor.render(state.image, action, seed=seed)
         try:
