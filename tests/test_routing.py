@@ -241,13 +241,13 @@ def test_all_routes_share_the_net2_decision():
     scores = lambda image, question: (0.9 if bright(image) else 0.1) if 'tea' in question else (0.69 if bright(image) else 0.72) if 'cup' in question else 0.95
     decisions = []
     for route in ('local', 'global', 'turn'):
-        harness = configure_routing(ReDAGHarness(TwoStageVerifier(scores), None),
+        harness = configure_routing(ReDAGHarness(TwoStageVerifier(scores), None, feather_px=0),
                                     SimpleNamespace(turn_gate='net2', global_gate='net2', local_gate='net2'))
         action = ControllerAction('add_entity', (0.0, 0.0, 1.0, 1.0), 'Add tea.')
         harness.evaluate_candidate_action(state, dag, 'tea', action, torch.ones(3, 16, 16), None, route=route, targets=['tea'])
         decisions.append(harness.last_candidate['accepted'])
     assert decisions == [False, False, False]
-    harness = configure_routing(ReDAGHarness(TwoStageVerifier(scores), None), SimpleNamespace())
+    harness = configure_routing(ReDAGHarness(TwoStageVerifier(scores), None, feather_px=0), SimpleNamespace())
     harness.evaluate_candidate_action(state, dag, 'tea', ControllerAction('add_entity', (0.0, 0.0, 1.0, 1.0), 'Add tea.'), torch.ones(3, 16, 16), None, route='local')
     assert harness.last_candidate['accepted']
 
