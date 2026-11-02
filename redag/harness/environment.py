@@ -181,7 +181,7 @@ class ReDAGHarness:
         self.turn_request, self.turn_nodes, self.turn_index, self.draft_first_turn = '', set(), 0, False
         self.global_retries, self.global_failures = 0, {}
         self.strategy, self.local_failures, self.turn_count, self.on_turn_start = None, {}, 1, None
-        self.turn_retries, self.turn_priority, self.local_gate = 0, False, 'legacy'
+        self.turn_retries, self.turn_priority, self.local_gate, self.turn_localize = 0, False, 'legacy', False
 
     def budget_left(self):
         if self.render_limit is None or not self.generation_budget:
@@ -238,8 +238,15 @@ class ReDAGHarness:
             return []
         return [nid for nid in dag.nodes if nid in self.turn_nodes and state.scores.get(nid, 0.0) < dag.nodes[nid].threshold]
 
-    def turn_box(self, dag, targets):
-        boxes = [edit_footprint(dag, nid) for nid in targets]
+    def turn_footprint(self, dag, node_id, image=None):
+        node = dag.nodes[node_id]
+        if self.turn_localize and node.node_type == 'prohibition' and node.entity_phrase.strip() and self.grounder is not None and image is not None:
+            found = self.grounder.locate(image, node.entity_phrase)
+            return (min(b[0] for b in found), min(b[1] for b in found), max(b[2] for b in found), max(b[3] for b in found)) if found else None
+        return edit_footprint(dag, node_id)
+
+    def turn_box(self, dag, targets, image=None):
+        boxes = [self.turn_footprint(dag, nid, image) for nid in targets]
         if any(b is None or box_area(b) >= WHOLE_CANVAS_SHARE for b in boxes):
             return CANVAS
         union = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
@@ -274,7 +281,7 @@ class ReDAGHarness:
             undrawn = [n for n in targets if seen.get(n, 0.0) < graph.nodes[n].threshold]
             dropped = sorted(n for n in previous['parent_state'].protected_set if n in graph.nodes and seen.get(n, 1.0) < graph.nodes[n].threshold)
             instruction = retry_instruction(self.turn_request, graph, undrawn, dropped)
-        action = ControllerAction('modify_attr', self.turn_box(graph, targets), instruction)
+        action = ControllerAction('modify_attr', self.turn_box(graph, targets, state.image), instruction)
         self.generation_counter += 1
         crop = editor.render(state.image, action, seed=seed)
         try:
@@ -756,6 +763,7 @@ def add_runtime_arguments(parser):
     parser.add_argument('--turn_gate', choices=('joint', 'mean', 'net', 'net2'), default='joint')
     parser.add_argument('--turn_retries', type=int, default=0)
     parser.add_argument('--turn_priority', action='store_true')
+    parser.add_argument('--turn_localize', action='store_true')
     parser.add_argument('--strategy_policy')
     return parser
 
@@ -806,6 +814,7 @@ def configure_routing(harness, args):
     harness.turn_retries = int(getattr(args, 'turn_retries', 0) or 0)
     harness.turn_priority = bool(getattr(args, 'turn_priority', False))
     harness.local_gate = getattr(args, 'local_gate', 'legacy') or 'legacy'
+    harness.turn_localize = bool(getattr(args, 'turn_localize', False))
     if getattr(args, 'strategy_policy', None):
         from redag.learn.strategy import StrategyPolicy
         harness.strategy = StrategyPolicy.load(args.strategy_policy, sample=False)

@@ -81,6 +81,15 @@ class Grounder:
             return merged
         return cls(detect, segment)
 
+    def locate(self, image, phrase):
+        height, width = image.shape[-2:]
+        boxes = []
+        for box in self.detector(image, phrase):
+            b = tuple(float(max(0, min(1, x / size))) for x, size in zip(box, (width, height, width, height)))
+            if b[0] < b[2] and b[1] < b[3] and not any(compute_box_iou(b, other) > 0.8 for other in boxes):
+                boxes.append(b)
+        return boxes
+
     def ground(self, image, dag, node_ids=None):
         result = deepcopy(dag)
         selected = set(dag.nodes) if node_ids is None else set(node_ids)
@@ -95,12 +104,7 @@ class Grounder:
                 continue
             phrase = node.entity_phrase
             if phrase not in detections:
-                raw = self.detector(image, phrase)
-                boxes = []
-                for box in raw:
-                    b = tuple(float(max(0, min(1, x / size))) for x, size in zip(box, (width, height, width, height)))
-                    if b[0] < b[2] and b[1] < b[3] and not any(compute_box_iou(b, other) > 0.8 for other in boxes):
-                        boxes.append(b)
+                boxes = self.locate(image, phrase)
                 detections[phrase] = boxes
                 self.counts[phrase] = len(boxes)
                 occupied = [n.bbox for key, n in dag.nodes.items() if key not in selected and n.node_type == "entity" and n.entity_phrase == phrase and n.bbox]
