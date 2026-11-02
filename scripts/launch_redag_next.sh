@@ -65,6 +65,7 @@ RETRY=(--turn_pass --scope_routing --user_text --global_retries 1)
 NETR=(--turn_pass --scope_routing --user_text --turn_gate net --global_gate net --global_retries 1 --turn_retries 1 --turn_priority)
 V2=(--turn_pass --scope_routing --user_text --turn_gate net2 --global_gate net2 --local_gate net2 --global_retries 1 --turn_retries 1 --turn_priority)
 V3=("${V2[@]}" --turn_localize)
+RLF=(--turn_pass --scope_routing --user_text --global_retries 1 --turn_priority --turn_retries 2)
 
 silent_scores() {
   local include="${1:-.}" exclude="${2:-^$}" files=() f
@@ -254,7 +255,10 @@ case "${TASK}" in
     nohup bash scripts/launch_redag_next.sh chain_t2i "${GPU}" "${ARG3:-net}" "${4:-0 1 2 10}" > "runs/logs/next_chain_t2i_${ARG3:-net}.log" 2>&1 &
     ;;
   chain_rl_i2i)
-    for s in 0 1 2 10; do eval_variant "rl$(basename "${ARG3}" .json)" "${s}" i2i "${FULL[@]}" --strategy_policy "${ARG3}"; done
+    for s in 0 1 2 10; do eval_variant "rl$(basename "${ARG3}" .json)" "${s}" i2i "${RLF[@]}" --strategy_policy "${ARG3}"; done
+    ;;
+  chain_rl_t2i)
+    for s in ${4:-0 1 2 10}; do eval_variant "rl$(basename "${ARG3}" .json)" "${s}" t2i "${RLF[@]}" --strategy_policy "${ARG3}"; done
     ;;
   net) eval_variant net "${ARG3:-0}" i2i "${NET[@]}" ;;
   mean2) eval_variant mean2 "${ARG3:-0}" i2i "${MEAN2[@]}" ;;
@@ -274,6 +278,6 @@ case "${TASK}" in
     nohup bash scripts/launch_redag_next.sh chain917 0 > runs/logs/next_chain917.log 2>&1 &
     ;;
   *)
-    echo "tasks: full <shard> | budget <shard> | mean <shard> | silent | headroom_editor | headroom_controller | pilot_flux_zero | pilot_q21 | pilot_2511 | bakeoff | bakeoff_report | net <shard> | mean2 <shard> | retry <shard> | netr <shard> | v2 <shard> | v3 <shard> | chain_t2i <gate> [shards] | start_t2i <gate> | chain_rl_i2i <policy> | fetch | start902 | start917 | start917_6h | start917_6h_b"
+    echo "tasks: full <shard> | budget <shard> | mean <shard> | silent | headroom_editor | headroom_controller | pilot_flux_zero | pilot_q21 | pilot_2511 | bakeoff | bakeoff_report | net <shard> | mean2 <shard> | retry <shard> | netr <shard> | v2 <shard> | v3 <shard> | chain_t2i <gate> [shards] | start_t2i <gate> | chain_rl_i2i <policy> | chain_rl_t2i <policy> [shards] | fetch | start902 | start917 | start917_6h | start917_6h_b"
     ;;
 esac
