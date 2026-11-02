@@ -94,11 +94,11 @@ case "${TASK}" in
   budget) eval_variant budget "${ARG3:-0}" i2i ;;
   mean) eval_variant mean "${ARG3:-0}" i2i "${MEAN[@]}" ;;
   silent) silent_scores "${ARG3:-.}" ;;
-  headroom_editor) headroom editor 8 "${SFT[@]}" --out runs/eval/headroom_flux_sft_editor.jsonl ;;
-  headroom_controller) headroom controller 4 "${SFT[@]}" --out runs/eval/headroom_flux_sft_controller.jsonl ;;
+  headroom_editor) headroom editor 8 "${SFT[@]}" --limit 80 --out runs/eval/headroom_flux_sft_editor.jsonl ;;
+  headroom_controller) headroom controller 4 "${SFT[@]}" --limit 80 --out runs/eval/headroom_flux_sft_controller.jsonl ;;
   pilot_2511)
     headroom editor 4 --controller_adapter runs/sft/controller --editor_kind pipeline --editor_offload --editor_context_pad 0.25 \
-      --editor_model "${M}/Qwen/Qwen-Image-Edit-2511" --limit 60 --out runs/eval/headroom_qwen2511_editor.jsonl
+      --editor_model "${M}/Qwen/Qwen-Image-Edit-2511" --limit 40 --out runs/eval/headroom_qwen2511_editor.jsonl
     ;;
   chain902_gpu0)
     eval_variant full 0 "" "${FULL[@]}"
@@ -115,11 +115,11 @@ case "${TASK}" in
     ;;
   chain917)
     silent_scores rl_counterfactual
-    headroom editor 8 "${SFT[@]}" --out runs/eval/headroom_flux_sft_editor.jsonl
-    headroom controller 4 "${SFT[@]}" --out runs/eval/headroom_flux_sft_controller.jsonl
-    if [ -f "${M}/Qwen/Qwen-Image-Edit-2511/model_index.json" ] && ls "${M}/Qwen/Qwen-Image-Edit-2511/transformer/"*.safetensors > /dev/null 2>&1; then
+    headroom editor 8 "${SFT[@]}" --limit 80 --out runs/eval/headroom_flux_sft_editor.jsonl
+    headroom controller 4 "${SFT[@]}" --limit 80 --out runs/eval/headroom_flux_sft_controller.jsonl
+    if grep -q "^DONE" /root/autodl-tmp/claude_view/dl_2511.log 2>/dev/null; then
       headroom editor 4 --controller_adapter runs/sft/controller --editor_kind pipeline --editor_offload --editor_context_pad 0.25 \
-        --editor_model "${M}/Qwen/Qwen-Image-Edit-2511" --limit 60 --out runs/eval/headroom_qwen2511_editor.jsonl
+        --editor_model "${M}/Qwen/Qwen-Image-Edit-2511" --limit 40 --out runs/eval/headroom_qwen2511_editor.jsonl
     else
       note "skip 2511 pilot: weights incomplete"
     fi
