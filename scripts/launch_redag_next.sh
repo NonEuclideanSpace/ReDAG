@@ -56,6 +56,9 @@ eval_variant() {
 
 FULL=(--turn_pass --scope_routing --user_text)
 MEAN=(--turn_pass --scope_routing --user_text --turn_gate mean --global_gate mean)
+NET=(--turn_pass --scope_routing --user_text --turn_gate net --global_gate net --global_retries 1)
+MEAN2=(--turn_pass --scope_routing --user_text --turn_gate mean --global_gate mean --global_retries 1)
+RETRY=(--turn_pass --scope_routing --user_text --global_retries 1)
 
 silent_scores() {
   local include="${1:-.}" exclude="${2:-^$}" files=() f
@@ -159,6 +162,17 @@ bakeoff_report() {
   note "bakeoff report rc=$?"
 }
 
+wait_for() {
+  while pgrep -f "$1" > /dev/null; do
+    sleep 30
+  done
+}
+
+gate_variants() {
+  for s in 0 1 2 10; do eval_variant net "${s}" i2i "${NET[@]}"; done
+  for s in 0 1 2 10; do eval_variant mean2 "${s}" i2i "${MEAN2[@]}"; done
+}
+
 bakeoff() {
   pilot_q21 90
   headroom flux_sft "${PYTHON}" editor 4 "${SFT[@]}" --limit 40 --out runs/eval/headroom_flux_sft_editor.jsonl
@@ -207,6 +221,22 @@ case "${TASK}" in
     silent_scores rl_counterfactual
     headroom flux_sft_ctrl "${PYTHON}" controller 4 "${SFT[@]}" --limit 40 --out runs/eval/headroom_flux_sft_controller.jsonl
     ;;
+  chain917_6h_b)
+    wait_for headroom_qwen21_editor
+    note "done headroom qwen21 (waited)"
+    headroom flux_sft "${PYTHON}" editor 4 "${SFT[@]}" --limit 40 --out runs/eval/headroom_flux_sft_editor.jsonl
+    pilot_flux_zero
+    bakeoff_report
+    gate_variants
+    pilot_2511 30
+    bakeoff_report
+    ;;
+  start917_6h_b)
+    nohup bash scripts/launch_redag_next.sh chain917_6h_b 0 > runs/logs/next_chain917_6h_b.log 2>&1 &
+    ;;
+  net) eval_variant net "${ARG3:-0}" i2i "${NET[@]}" ;;
+  mean2) eval_variant mean2 "${ARG3:-0}" i2i "${MEAN2[@]}" ;;
+  retry) eval_variant retry "${ARG3:-0}" i2i "${RETRY[@]}" ;;
   start917_6h)
     nohup bash scripts/launch_redag_next.sh chain917_6h 0 > runs/logs/next_chain917_6h.log 2>&1 &
     ;;
@@ -219,6 +249,6 @@ case "${TASK}" in
     nohup bash scripts/launch_redag_next.sh chain917 0 > runs/logs/next_chain917.log 2>&1 &
     ;;
   *)
-    echo "tasks: full <shard> | budget <shard> | mean <shard> | silent | headroom_editor | headroom_controller | pilot_flux_zero | pilot_q21 | pilot_2511 | bakeoff | bakeoff_report | fetch | start902 | start917 | start917_6h"
+    echo "tasks: full <shard> | budget <shard> | mean <shard> | silent | headroom_editor | headroom_controller | pilot_flux_zero | pilot_q21 | pilot_2511 | bakeoff | bakeoff_report | net <shard> | mean2 <shard> | retry <shard> | fetch | start902 | start917 | start917_6h | start917_6h_b"
     ;;
 esac
