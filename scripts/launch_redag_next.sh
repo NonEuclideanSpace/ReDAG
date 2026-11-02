@@ -40,6 +40,8 @@ eval_variant() {
   local extra=()
   if [ "${subset}" = "i2i" ]; then
     extra=(--only_kinds i2i)
+  elif [ "${subset}" = "t2i" ]; then
+    extra=(--only_kinds t2i)
   elif [ "${subset}" = "k10t2i" ]; then
     extra=(--only_kinds t2i --only_k 10)
   fi
@@ -234,6 +236,19 @@ case "${TASK}" in
   start917_6h_b)
     nohup bash scripts/launch_redag_next.sh chain917_6h_b 0 > runs/logs/next_chain917_6h_b.log 2>&1 &
     ;;
+  chain_t2i)
+    case "${ARG3:-net}" in
+      net) for s in 0 1 2 10; do eval_variant net "${s}" t2i "${NET[@]}"; done ;;
+      mean2) for s in 0 1 2 10; do eval_variant mean2 "${s}" t2i "${MEAN2[@]}"; done ;;
+      full) for s in 0 1 2 10; do eval_variant full "${s}" t2i "${FULL[@]}"; done ;;
+    esac
+    ;;
+  start_t2i)
+    nohup bash scripts/launch_redag_next.sh chain_t2i "${GPU}" "${ARG3:-net}" > "runs/logs/next_chain_t2i_${ARG3:-net}.log" 2>&1 &
+    ;;
+  chain_rl_i2i)
+    for s in 0 1 2 10; do eval_variant "rl$(basename "${ARG3}" .json)" "${s}" i2i "${FULL[@]}" --strategy_policy "${ARG3}"; done
+    ;;
   net) eval_variant net "${ARG3:-0}" i2i "${NET[@]}" ;;
   mean2) eval_variant mean2 "${ARG3:-0}" i2i "${MEAN2[@]}" ;;
   retry) eval_variant retry "${ARG3:-0}" i2i "${RETRY[@]}" ;;
@@ -249,6 +264,6 @@ case "${TASK}" in
     nohup bash scripts/launch_redag_next.sh chain917 0 > runs/logs/next_chain917.log 2>&1 &
     ;;
   *)
-    echo "tasks: full <shard> | budget <shard> | mean <shard> | silent | headroom_editor | headroom_controller | pilot_flux_zero | pilot_q21 | pilot_2511 | bakeoff | bakeoff_report | net <shard> | mean2 <shard> | retry <shard> | fetch | start902 | start917 | start917_6h | start917_6h_b"
+    echo "tasks: full <shard> | budget <shard> | mean <shard> | silent | headroom_editor | headroom_controller | pilot_flux_zero | pilot_q21 | pilot_2511 | bakeoff | bakeoff_report | net <shard> | mean2 <shard> | retry <shard> | chain_t2i <gate> | start_t2i <gate> | chain_rl_i2i <policy> | fetch | start902 | start917 | start917_6h | start917_6h_b"
     ;;
 esac
