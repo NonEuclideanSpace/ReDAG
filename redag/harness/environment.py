@@ -226,6 +226,11 @@ class ReDAGHarness:
         clip = lambda x: max(-3.0, min(3.0, float(x))) / 3
         return [1.0, undrawn, clip(damaged), self.budget_left(), float(self.turn_index >= self.turn_count - 1), clip(attempts)]
 
+    def turn_features(self, state, dag, targets):
+        at_risk = min(1.0, sum(1 for n in dag.nodes if n not in targets and state.scores.get(n, 0.0) >= dag.nodes[n].threshold) / 30.0)
+        canvas = float(self.turn_box(dag, targets, state.image) == CANVAS)
+        return [1.0, canvas, at_risk, canvas * at_risk, len(targets) / max(1, len(dag.nodes)), float(self.turn_index >= self.turn_count - 1), self.budget_left()]
+
     def routes_globally(self, dag, node_id):
         if self.global_retries and self.global_failures.get((self.turn_index, node_id), 0) >= self.global_retries:
             return False
@@ -583,6 +588,8 @@ class ReDAGHarness:
                     break
                 retry = self.turn_retry_source(records)
                 turn_targets = self.turn_targets(dag, state) if step == 0 or retry is not None else []
+                if turn_targets and step == 0 and self.strategy is not None and self.mode == 'redag_full' and not self.strategy.decide('turn', self.turn_features(state, dag, turn_targets)):
+                    turn_targets = []
                 frontier = self.active_frontier(dag, state.scores)
                 if not frontier and not turn_targets:
                     reason = 'satisfied' if all(state.scores[n] >= dag.nodes[n].threshold for n in dag.nodes) else 'blocked_frontier'

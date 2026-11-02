@@ -2,7 +2,7 @@ from types import SimpleNamespace
 import torch
 from redag.graph.schema import CanvasState, ConditionDAG, ConditionNode, ControllerAction
 from redag.harness.environment import ReDAGHarness, run_record
-from redag.learn.strategy import ACCEPT_FEATURES, RETRY_FEATURES, ROUTE_FEATURES, StrategyPolicy, default_weights, group_advantages, policy_gradient
+from redag.learn.strategy import ACCEPT_FEATURES, RETRY_FEATURES, ROUTE_FEATURES, TURN_FEATURES, StrategyPolicy, default_weights, group_advantages, policy_gradient
 from redag.verify.verifier import TwoStageVerifier
 
 
@@ -133,3 +133,25 @@ def test_policy_files_with_another_schema_are_refused(tmp_path):
         pass
     else:
         raise AssertionError('schema mismatch accepted')
+
+
+def test_strategy_decides_whether_a_turn_starts_with_the_user_request():
+    a = node('a', 'entity', 'Is there an apple?', 'apple', (0.1, 0.1, 0.3, 0.3))
+    b = node('b', 'entity', 'Is there a banana?', 'banana', scope='global')
+    record = {'kind': 'i2i', 'image': torch.zeros(3, 16, 16),
+              'turns': [{'user_prompt': 'keep the apple', 'graph': graph_dict(a)}, {'user_prompt': 'add a banana', 'graph': graph_dict(b)}]}
+    scores = lambda image, question: 0.9 if 'apple' in question or float(image.mean()) > 0.5 else 0.1
+    editor = SimpleNamespace(render=lambda image, act, seed=42: torch.ones(3, 16, 16))
+    controller = SimpleNamespace(sample=lambda *args, **kwargs: {'action': ControllerAction('add_entity', (0.5, 0.5, 0.9, 0.9), 'Add a banana.')})
+    for bias, route in ((5.0, 'turn'), (-5.0, 'local')):
+        weights = default_weights()
+        weights['turn'][0] = bias
+        policy = StrategyPolicy(weights, sample=False)
+        harness = ReDAGHarness(TwoStageVerifier(scores), None)
+        harness.turn_pass, harness.strategy, harness.generation_budget = True, policy, 5
+        state, dag, steps = run_record(record, harness, controller, editor, max_steps=1)
+        assert [s['route'] for s in steps] == [route]
+        turns = [d for d in policy.log if d['kind'] == 'turn']
+        assert len(turns) == 1 and len(turns[0]['features']) == len(TURN_FEATURES)
+        assert turns[0]['features'][1] == 1.0 and turns[0]['features'][2] == round(1 / 30, 4)
+    assert StrategyPolicy(sample=False).decide('turn', [1.0] + [0.0] * (len(TURN_FEATURES) - 1))
