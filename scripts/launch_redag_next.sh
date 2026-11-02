@@ -33,6 +33,7 @@ MODELS=(
 SFT=(--controller_adapter runs/sft/controller --editor_adapter runs/sft/editor --editor_context_pad 0.25)
 TURN_BUDGET=(--max_steps 3 --generation_budget 3 --budget_per_turn --verification_budget 400 --num_denoise_steps 28 --seed 42)
 JUDGE="${M}/Qwen/Qwen3-VL-8B-Instruct"
+DATA="${DATA:-data/final/eval_main_v2.jsonl}"
 
 eval_variant() {
   local name="$1" shard="$2" subset="$3"
@@ -47,7 +48,7 @@ eval_variant() {
   fi
   local out="runs/eval/exp1_next_${name}${subset:+_${subset}}.s${shard}.json"
   note "start ${name} ${subset:-all} shard ${shard}"
-  "${PYTHON}" scripts/run_eval_benchmarks.py "${MODELS[@]}" --exp_id 1 --data data/final/eval_main.jsonl --exp1_modes redag_full \
+  "${PYTHON}" scripts/run_eval_benchmarks.py "${MODELS[@]}" --exp_id 1 --data "${DATA}" --exp1_modes redag_full \
     "${SFT[@]}" "${TURN_BUDGET[@]}" --shard "${shard}" --num_shards 12 --output "${out}" "${extra[@]}" "$@" \
     > "runs/logs/next_${name}${subset:+_${subset}}.s${shard}.log" 2>&1
   note "done ${name} ${subset:-all} shard ${shard} rc=$?"
