@@ -33,7 +33,7 @@ MODELS=(
 SFT=(--controller_adapter runs/sft/controller --editor_adapter runs/sft/editor --editor_context_pad 0.25)
 TURN_BUDGET=(--max_steps 3 --generation_budget 3 --budget_per_turn --verification_budget 400 --num_denoise_steps 28 --seed 42)
 JUDGE="${M}/Qwen/Qwen3-VL-8B-Instruct"
-DATA="${DATA:-data/final/eval_main_v2.jsonl}"
+DATA="${DATA:-data/final/eval_main.jsonl}"
 
 eval_variant() {
   local name="$1" shard="$2" subset="$3"
