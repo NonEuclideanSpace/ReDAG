@@ -252,6 +252,8 @@ def main():
             variant.append(f'turn_retries_{args.turn_retries}')
         if getattr(args, 'turn_priority', False):
             variant.append('turn_priority')
+        if getattr(args, 'local_gate', 'legacy') != 'legacy':
+            variant.append(f'local_gate_{args.local_gate}')
         if getattr(args, 'strategy_policy', None):
             variant.append('strategy_' + Path(args.strategy_policy).stem)
         if variant:
