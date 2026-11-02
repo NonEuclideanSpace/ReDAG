@@ -1,5 +1,6 @@
 from copy import deepcopy
 from dataclasses import asdict
+import re
 import torch
 import torch.nn.functional as F
 from redag.config import ReDAGConfig
@@ -52,6 +53,62 @@ def compose_instruction(instruction, statements):
     return instruction.rstrip() + ' In the same edit, also make sure that ' + '; '.join(statements) + '.'
 
 
+GLOBAL_ROUTE_TYPES = ('background', 'global', 'relation_wide', 'count', 'prohibition')
+WIDE_SUPPORT_SHARE = 0.5
+
+
+def route_class(dag, node_id):
+    node = dag.nodes[node_id]
+    if node.node_type in ('background', 'count', 'prohibition'):
+        return node.node_type
+    if node.scope == 'global':
+        return 'entity_global' if node.node_type == 'entity' else 'global'
+    if node.node_type == 'relation':
+        support = semantic_support(dag, node_id)
+        return 'relation_wide' if support is None or box_area(support) >= WIDE_SUPPORT_SHARE else 'relation_local'
+    return 'local'
+
+
+def request_snippet(request, dag, node_id, max_words=40):
+    request = ' '.join(str(request or '').split())
+    if not request:
+        return ''
+    phrases = {dag.nodes[node_id].entity_phrase.strip().lower()} | {dag.nodes[p].entity_phrase.strip().lower() for p in condition_parents(dag, node_id)}
+    phrases = {p for p in phrases if p}
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?;])\s+', request) if s.strip()]
+    chosen = [s for s in sentences if any(p in s.lower() for p in phrases)]
+    if chosen:
+        return ' '.join(chosen)
+    return request if len(request.split()) <= max_words else ''
+
+
+def with_user_request(instruction, snippet):
+    if not snippet:
+        return instruction
+    return instruction.rstrip() + ' The user asked: "' + snippet.strip().rstrip('.') + '."'
+
+
+def global_instruction(request, node):
+    request = ' '.join(str(request or '').split()).rstrip('.')
+    statement = requirement_statement(node)
+    return (request + '. ' if request else '') + 'Make sure that ' + statement + '.'
+
+
+def turn_instruction(request):
+    request = ' '.join(str(request or '').split()).rstrip('.')
+    return request + '. Keep everything else in the image unchanged.'
+
+
+def joint_acceptance(dag, targets, prev_scores, new_scores, protected_set, affected, min_target_gain=0.05, gate='joint'):
+    target_ok = any(new_scores[t] - prev_scores[t] >= min_target_gain or new_scores[t] >= dag.nodes[t].threshold for t in targets)
+    gain = sum(dag.nodes[v].weight * (new_scores[v] - prev_scores[v]) for v in affected)
+    if not target_ok or gain <= 0:
+        return False
+    if gate == 'mean':
+        return True
+    return all(new_scores[v] >= dag.nodes[v].threshold for v in protected_set & affected)
+
+
 class ReDAGHarness:
     def __init__(self, verifier, grounder, feather_px=None, step_cost=None, lam=None, config=None, mode='redag_full'):
         self.config = config or ReDAGConfig()
@@ -69,6 +126,46 @@ class ReDAGHarness:
         self.closure_instructions, self.closure_limit, self.confirm_drops, self.soft_gating = False, 3, False, False
         self.preserve_instructions, self.dag_box, self.edge_policy = False, False, 'full'
         self.counterfactual_credit, self.acceptance_bonus = False, 0.0
+        self.scope_routing, self.global_types, self.global_gate = False, GLOBAL_ROUTE_TYPES, 'joint'
+        self.user_text, self.turn_pass, self.turn_gate = False, False, 'joint'
+        self.turn_request, self.turn_nodes, self.turn_index, self.draft_first_turn = '', set(), 0, False
+
+    def routes_globally(self, dag, node_id):
+        return self.scope_routing and self.mode == 'redag_full' and route_class(dag, node_id) in self.global_types
+
+    def turn_targets(self, dag, state):
+        if not self.turn_pass or self.mode != 'redag_full' or not self.turn_request.strip():
+            return []
+        if self.turn_index == 0 and self.draft_first_turn:
+            return []
+        return [nid for nid in dag.nodes if nid in self.turn_nodes and state.scores.get(nid, 0.0) < dag.nodes[nid].threshold]
+
+    def turn_box(self, dag, targets):
+        boxes = [edit_footprint(dag, nid) for nid in targets]
+        if any(b is None or box_area(b) >= WHOLE_CANVAS_SHARE for b in boxes):
+            return CANVAS
+        union = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+        union = expand_bbox_with_margin(union, 1.25)
+        return CANVAS if box_area(union) >= WHOLE_CANVAS_SHARE else union
+
+    def turn_candidates(self, state, dag, editor, targets, seed):
+        if self.render_limit is not None and self.generation_counter >= self.render_limit:
+            return []
+        if self.verifier.call_limit is not None and self.verifier.call_counter >= self.verifier.call_limit:
+            return []
+        if self.cost_budget is not None and self.cost_origin is not None and self.spent_cost() >= self.cost_budget:
+            return []
+        graph = deepcopy(dag)
+        action = ControllerAction('modify_attr', self.turn_box(graph, targets), turn_instruction(self.turn_request))
+        self.generation_counter += 1
+        crop = editor.render(state.image, action, seed=seed)
+        try:
+            self.evaluate_candidate_action(state, graph, targets[0], action, crop, None, route='turn', targets=targets)
+        except RuntimeError as error:
+            if str(error) != 'Verifier call budget exhausted':
+                raise
+            return []
+        return [dict(self.last_candidate, sample={'action': action, 'route': 'turn', 'targets': list(targets)})]
 
     def effective_graph(self, dag):
         if self.mode not in ('redag_full', 'flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates'):
@@ -186,12 +283,19 @@ class ReDAGHarness:
         scores = self.verify_current(image, dag, dict.fromkeys(dag.nodes, 0.0), set(dag.nodes))
         return CanvasState(image, scores, {n for n in dag.nodes if n not in self.unknown_nodes and scores[n] >= dag.nodes[n].threshold}), dag
 
-    def evaluate_candidate_action(self, parent_state, dag, target_node_id, action, edited_crop, editable=None):
+    def evaluate_candidate_action(self, parent_state, dag, target_node_id, action, edited_crop, editable=None, route='local', targets=None):
         calls, start = self.verifier.call_counter, len(self.verifier.records)
         graph = self.effective_graph(dag)
         self.verifier.two_stage = self.mode not in BASELINE_MODES
-        candidate = paste_window_strictly_local(parent_state.image, edited_crop, action.box, self.feather_px, editable)
-        if self.mode == 'redag_full':
+        targets = list(targets or [target_node_id])
+        whole = box_area(action.box) >= WHOLE_CANVAS_SHARE
+        joint = route in ('global', 'turn')
+        candidate = paste_window_strictly_local(parent_state.image, edited_crop, action.box, 0 if joint and whole else self.feather_px, editable)
+        if joint and whole:
+            affected = set(graph.nodes)
+        elif route == 'turn':
+            affected = set().union(*(compute_affected_subgraph(graph, action, t, parent_state.protected_set) for t in targets))
+        elif self.mode == 'redag_full':
             affected = compute_affected_subgraph(graph, action, target_node_id, parent_state.protected_set)
         elif self.mode in ('spatial_local', 'spatial_no_gates'):
             affected = compute_spatial_subgraph(dag, action, target_node_id)
@@ -201,10 +305,14 @@ class ReDAGHarness:
         raw_scores = self.verifier.verify_subgraph_after_edit(candidate, graph, parent_state.scores, affected)
         refuted = []
         target_gain = raw_scores[target_node_id] - parent_state.scores[target_node_id]
-        if self.confirm_drops and self.mode == 'redag_full' and (target_gain >= self.config.min_target_gain or raw_scores[target_node_id] >= dag.nodes[target_node_id].threshold):
+        if not joint and self.confirm_drops and self.mode == 'redag_full' and (target_gain >= self.config.min_target_gain or raw_scores[target_node_id] >= dag.nodes[target_node_id].threshold):
             raw_scores, refuted = self.confirm_protected_drops(parent_state, graph, target_node_id, action, candidate, raw_scores, affected)
-        accepted = check_local_acceptance(graph, target_node_id, parent_state.scores, raw_scores, parent_state.protected_set, affected,
-                                         self.config.min_target_gain, self.config.max_protected_drop)
+        if joint:
+            accepted = joint_acceptance(graph, targets, parent_state.scores, raw_scores, parent_state.protected_set, affected,
+                                        self.config.min_target_gain, self.turn_gate if route == 'turn' else self.global_gate)
+        else:
+            accepted = check_local_acceptance(graph, target_node_id, parent_state.scores, raw_scores, parent_state.protected_set, affected,
+                                             self.config.min_target_gain, self.config.max_protected_drop)
         delivered_image = candidate if accepted else parent_state.image
         delivered_scores = raw_scores if accepted else dict(parent_state.scores)
         reward_scores = raw_scores if self.counterfactual_credit else delivered_scores
@@ -217,7 +325,7 @@ class ReDAGHarness:
             candidate_state=CanvasState(candidate, raw_scores, {n for n in raw_scores if raw_scores[n] >= dag.nodes[n].threshold}),
             delivered_state=state, raw_scores=raw_scores, affected=affected, target_node_id=target_node_id, action=action,
             accepted=accepted, reward=reward, coverage_uncertain_nodes=sorted(uncertain), refuted_drops=refuted,
-            stage_scores=self.verifier.records[start:], verifier_calls=self.verifier.call_counter - calls)
+            stage_scores=self.verifier.records[start:], verifier_calls=self.verifier.call_counter - calls, route=route, targets=targets)
         return state, reward, accepted, affected
 
     def editable_mask(self, state, dag, target_node_id, action):
@@ -280,28 +388,35 @@ class ReDAGHarness:
                     break
                 self.restore_grounding(grounding)
                 graph = deepcopy(dag)
-                sample = controller.sample(state, graph, target_node_id, seed=seed + index, temperature=0.8,
-                    detected_count=self.grounder.counts.get(dag.nodes[target_node_id].entity_phrase, 1) if self.grounder else 1)
+                route = 'global' if self.routes_globally(graph, target_node_id) else 'local'
+                if route == 'global':
+                    sample = {'action': ControllerAction('modify_attr', CANVAS, global_instruction(self.turn_request, graph.nodes[target_node_id]))}
+                else:
+                    sample = controller.sample(state, graph, target_node_id, seed=seed + index, temperature=0.8,
+                        detected_count=self.grounder.counts.get(dag.nodes[target_node_id].entity_phrase, 1) if self.grounder else 1)
                 self.generation_counter += 1
-                # common editor noise inside one group (candidates differ only by their action),
-                # different noise across groups, steps and evaluation seeds
                 if self.mode in BASELINE_MODES:
                     sample['action'] = ControllerAction(sample['action'].op, CANVAS, sample['action'].instruction)
-                if self.closure_instructions and self.mode == 'redag_full':
+                if route == 'local' and self.closure_instructions and self.mode == 'redag_full':
                     sample['closure_nodes'] = self.closure_requirements(state, graph, target_node_id, sample['action'])
                     sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, compose_instruction(
                         sample['action'].instruction, [requirement_statement(graph.nodes[nid]) for nid in sample['closure_nodes']]))
-                if self.dag_box and self.mode == 'redag_full':
+                if route == 'local' and self.dag_box and self.mode == 'redag_full':
                     sample['controller_box'] = sample['action'].box
                     sample['action'] = ControllerAction(sample['action'].op, self.snapped_box(graph, target_node_id, sample['action'].box), sample['action'].instruction)
-                if self.preserve_instructions and self.mode == 'redag_full':
+                if route == 'local' and self.preserve_instructions and self.mode == 'redag_full':
                     sample['preserve_nodes'] = self.preserve_requirements(state, graph, target_node_id, sample['action'])
                     phrases = preserved_phrases(graph, sample['preserve_nodes'], graph.nodes[target_node_id].entity_phrase)
                     if phrases:
                         sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, sample['action'].instruction.rstrip() + ' Keep the ' + ' and the '.join(phrases) + ' unchanged.')
-                crop, editable = self.render(editor, state, sample['action'], seed, self.editable_mask(state, graph, target_node_id, sample['action']))
+                if route == 'local' and self.user_text and self.mode == 'redag_full':
+                    snippet = request_snippet(self.turn_request, graph, target_node_id)
+                    sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, with_user_request(sample['action'].instruction, snippet))
+                sample['route'] = route
+                mask = None if route == 'global' else self.editable_mask(state, graph, target_node_id, sample['action'])
+                crop, editable = self.render(editor, state, sample['action'], seed, mask)
                 try:
-                    self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop, editable)
+                    self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop, editable, route=route)
                 except RuntimeError as error:
                     if str(error) != 'Verifier call budget exhausted':
                         raise
@@ -331,13 +446,17 @@ class ReDAGHarness:
                 if self.unknown_nodes:
                     reason = 'execution_budget'
                     break
+                turn_targets = self.turn_targets(dag, state) if step == 0 else []
                 frontier = self.active_frontier(dag, state.scores)
-                if not frontier:
+                if not frontier and not turn_targets:
                     reason = 'satisfied' if all(state.scores[n] >= dag.nodes[n].threshold for n in dag.nodes) else 'blocked_frontier'
                     break
                 frontier.sort(key=lambda nid: failures.get(nid, 0) >= self.retry_limit)
                 group_calls, group_renders = self.verifier.call_counter, self.generation_counter
-                candidates = self.sample_group(state, dag, controller, editor, frontier[0], group_size, seed + step * group_size)
+                if turn_targets:
+                    candidates = self.turn_candidates(state, dag, editor, turn_targets, seed + step * group_size)
+                else:
+                    candidates = self.sample_group(state, dag, controller, editor, frontier[0], group_size, seed + step * group_size)
                 if not candidates:
                     reason = 'execution_budget'
                     break
@@ -348,7 +467,7 @@ class ReDAGHarness:
                 state = chosen['delivered_state']
                 if chosen['accepted']:
                     failures.clear()
-                else:
+                elif not turn_targets:
                     failures[frontier[0]] = failures.get(frontier[0], 0) + 1
                 if chosen['accepted'] and self.grounder is not None:
                     dag = self.grounder.ground(state.image, dag, chosen['affected'])
@@ -385,6 +504,7 @@ class ReDAGHarness:
         for turn, request in enumerate(prompts):
             request = {'user_prompt': request} if isinstance(request, str) else request
             previous, superseded = dag, request.get('superseded_ids', request.get('supersedes'))
+            self.turn_request, self.turn_index = str(request.get('user_prompt') or ''), turn
             if 'graph' in request or 'dag' in request:
                 dag = preserve_previous_conditions(request.get('graph', request.get('dag')), previous, superseded)
             else:
@@ -393,6 +513,7 @@ class ReDAGHarness:
                 kwargs = {'superseded_ids': superseded} if superseded is not None else {}
                 dag = planner.plan(request['user_prompt'], previous_dag=previous, **kwargs)
                 dag = preserve_previous_conditions(dag, previous, superseded if superseded is not None else getattr(planner, 'last_superseded_ids', []))
+            self.turn_nodes = set(dag.nodes) - (set(previous.nodes) if previous is not None else set())
             if state is None:
                 state, dag = self.initialize(image, dag)
             else:
@@ -444,6 +565,8 @@ def run_record(record, harness, controller, editor, max_steps=10, seed=42, group
         generation_limits = [x for x in (limits[1], renders + harness.generation_budget if harness.generation_budget is not None else None) if x is not None]
         harness.verifier.call_limit = min(verification_limits, default=None)
         harness.render_limit = min(generation_limits, default=None)
+    harness.turn_request, harness.turn_nodes, harness.turn_index = '', set(), 0
+    harness.draft_first_turn = record.get('kind') == 't2i'
     try:
         if 'turns' in record:
             if not record['turns']:
@@ -487,18 +610,29 @@ def add_runtime_arguments(parser):
     parser.add_argument('--counterfactual_credit', action='store_true')
     parser.add_argument('--acceptance_bonus', type=float, default=0.0)
     parser.add_argument('--online_planner', action='store_true')
+    parser.add_argument('--editor_kind', choices=('flux', 'pipeline'), default='flux')
+    parser.add_argument('--editor_offload', action='store_true')
+    parser.add_argument('--scope_routing', action='store_true')
+    parser.add_argument('--global_types', default=','.join(GLOBAL_ROUTE_TYPES))
+    parser.add_argument('--global_gate', choices=('joint', 'mean'), default='joint')
+    parser.add_argument('--user_text', action='store_true')
+    parser.add_argument('--turn_pass', action='store_true')
+    parser.add_argument('--turn_gate', choices=('joint', 'mean'), default='joint')
     return parser
 
 
 def load_runtime(args, trainable_controller=False, trainable_editor=False):
     from redag.models.controller import Controller
-    from redag.models.editor import FluxEditor
+    from redag.models.editor import FluxEditor, PipelineEditor
     from redag.verify.grounder import Grounder
     from redag.verify.verifier import TwoStageVerifier, load_vlm_scorer
     dtype = torch.float32 if args.device == 'cpu' else torch.bfloat16
     controller = Controller.from_pretrained(args.controller_model, args.device, dtype, args.controller_adapter, trainable_controller)
     edit_device, verify_device = args.editor_device or args.device, args.verifier_device or args.device
-    editor = FluxEditor.from_pretrained(args.editor_model, edit_device, torch.float32 if edit_device == 'cpu' else torch.bfloat16, args.editor_adapter, trainable_editor)
+    if getattr(args, 'editor_kind', 'flux') == 'pipeline':
+        editor = PipelineEditor.from_pretrained(args.editor_model, edit_device, torch.bfloat16, getattr(args, 'editor_offload', False))
+    else:
+        editor = FluxEditor.from_pretrained(args.editor_model, edit_device, torch.float32 if edit_device == 'cpu' else torch.bfloat16, args.editor_adapter, trainable_editor)
     if getattr(args, 'num_denoise_steps', None):
         editor.num_steps = args.num_denoise_steps
     editor.work_side = getattr(args, 'editor_work_side', 0) or None
@@ -512,16 +646,25 @@ def load_runtime(args, trainable_controller=False, trainable_editor=False):
     harness.edge_policy = getattr(args, 'edge_policy', 'full')
     harness.counterfactual_credit = getattr(args, 'counterfactual_credit', False)
     harness.acceptance_bonus = float(getattr(args, 'acceptance_bonus', 0.0))
+    configure_routing(harness, args)
     return harness, controller, editor
 
 
-def validate_dataset(records, experiment, diagnostic, require_graphs=False):
-    """Check the K = 10/20/30 tiers of a main evaluation.
+def configure_routing(harness, args):
+    harness.scope_routing = bool(getattr(args, 'scope_routing', False))
+    types = tuple(t.strip() for t in str(getattr(args, 'global_types', ','.join(GLOBAL_ROUTE_TYPES))).split(',') if t.strip())
+    unknown = set(types) - {'background', 'global', 'entity_global', 'relation_wide', 'count', 'prohibition'}
+    if unknown:
+        raise ValueError(f'Unknown global route types: {sorted(unknown)}')
+    harness.global_types = types
+    harness.global_gate = getattr(args, 'global_gate', 'joint')
+    harness.user_text = bool(getattr(args, 'user_text', False))
+    harness.turn_pass = bool(getattr(args, 'turn_pass', False))
+    harness.turn_gate = getattr(args, 'turn_gate', 'joint')
+    return harness
 
-    Every session with complete graphs is validated (all turns merge into a valid ConditionDAG).  Sessions
-    whose turns still need the planner cannot be counted yet: they are accepted only before planning
-    (require_graphs=False); after planning every session must have graphs and the tiers must be complete.
-    """
+
+def validate_dataset(records, experiment, diagnostic, require_graphs=False):
     from collections import defaultdict
     from redag.models.planner import preserve_previous_conditions
     if not records:
@@ -543,6 +686,6 @@ def validate_dataset(records, experiment, diagnostic, require_graphs=False):
     if unplanned:
         if require_graphs:
             raise ValueError(f'{unplanned} sessions still have turns without a condition graph')
-        return  # tiers are enforced again once the planner has produced every graph
+        return
     if set(counts) != {10, 20, 30} or any(n < 100 for n in counts.values()):
         raise ValueError('Main evaluations require at least 100 sessions for each K=10/20/30')

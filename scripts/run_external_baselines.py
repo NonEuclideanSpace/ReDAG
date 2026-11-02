@@ -185,7 +185,6 @@ def run_single_session(args, record, editor, verifier, mllm_bundle):
             image = best_img
 
         elif args.baseline == 'vision_director':
-            # VisionDirector-style: global-to-local flat goal ordering + rollback if overall checklist score does not improve
             cur_scores = score_all_nodes(verifier, image, dag)
             ver_calls += len(dag.nodes)
             cur_mean = weighted_mean_score(dag, cur_scores)
@@ -206,7 +205,6 @@ def run_single_session(args, record, editor, verifier, mllm_bundle):
 
         elif args.baseline == 'genrevisit':
             processor, mllm = mllm_bundle
-            # Initial turn edit
             action = ControllerAction('modify_attr', CANVAS, user_prompt)
             crop = editor.render(image, action, seed=turn_seed)
             cand0 = paste_window_strictly_local(image, crop, CANVAS, 0)

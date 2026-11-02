@@ -35,7 +35,6 @@ def compute_flow_sde_sigma(t, eta=0.35):
 
 def predict_cfg_velocity(dit_model, z_t, z_src, text_embeds, null_text_embeds, t, cfg_scale=3.5):
     if getattr(dit_model, 'batched_cfg', False) and text_embeds.shape == null_text_embeds.shape:
-        # one batch-2 forward instead of two batch-1 forwards; identical math, better GPU utilisation
         both = dit_model(z_t=torch.cat((z_t, z_t)), z_src=torch.cat((z_src, z_src)),
                          text_embeds=torch.cat((null_text_embeds, text_embeds)), timesteps=torch.cat((t, t)))
         uncond, cond = both.chunk(2)
@@ -279,14 +278,6 @@ def save_training_audit(output, identifier, parent, delivered, dag, affected, me
 
 def train_alternating(harness, controller, editor, records, dev_records, output, config=None, rounds=2, epochs=1, batch_size=4,
                       reward_mode='subgraph_credit_ours', rollout_steps=5, seed=42, sources=None, interrupt_after=None, restore_best_editor=False):
-    """Alternating controller / editor RL (eq. 34, 39, 55), resumable at step granularity.
-
-    <output>/resume holds both LoRA adapters, the optimizer of the current stage, the RNG states, the data order, the
-    stage baseline and the best controller snapshot; it is written when a stage starts and after every step.  On a
-    rerun with the same settings, metrics and audit rows logged after it are dropped and training continues from it,
-    so an interrupted run ends with exactly the steps of an uninterrupted one.  A finished run (rl_complete.json)
-    returns its logged history.  interrupt_after=N is a test hook: stop right after the checkpoint of step N.
-    """
     import hashlib
     import json
     import time
@@ -342,7 +333,7 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
     def save_checkpoint(optimizer, next_position, next_epoch, next_offset, next_order):
         tensors = dict(controller=controller.snapshot(), editor=editor.snapshot())
         if best_ctrl is not None and next_position < len(stages) and stages[next_position][1] == 'ctrl_rl':
-            tensors['best_ctrl'] = best_ctrl  # only the controller stages restore their best development snapshot
+            tensors['best_ctrl'] = best_ctrl
         if restore_best_editor and best_edit is not None and next_position < len(stages) and stages[next_position][1] == 'edit_rl':
             tensors['best_edit'] = best_edit
         checkpoint.save(output, dict(fingerprint=fingerprint, step=step, position=next_position, epoch=next_epoch, offset=next_offset,
@@ -387,7 +378,7 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
         editor.eval()
         optimizer = torch.optim.AdamW(ctrl_params if stage == 'ctrl_rl' else edit_params,
                                      lr=cfg.lr_rl_controller if stage == 'ctrl_rl' else cfg.lr_rl_editor, weight_decay=0)
-        if baseline is None:  # the stage starts here
+        if baseline is None:
             baseline = evaluate_rl_development(dev_records, harness, controller, editor, ctrl_ref)
             best_p, best_ctrl, best_edit = baseline['dev_acceptance_p'], controller.snapshot(), (editor.snapshot() if restore_best_editor else None)
             epoch, offset, order_index = 0, 0, None
@@ -423,8 +414,6 @@ def train_alternating(harness, controller, editor, records, dev_records, output,
                                 editable = None
                         if editable is None:
                             conditioning = editor.prepare(state.image, action)
-                    # editor noise: shared by the controller candidates of one parent (they differ only by action),
-                    # distinct for the editor candidates of one parent, and fresh for every parent and step
                     noise_seed = seed + 1000 * step + 10 * parent_index
                     for index in range(cfg.group_size_ctrl if stage == 'ctrl_rl' else cfg.group_size_edit):
                         if stage == 'ctrl_rl':

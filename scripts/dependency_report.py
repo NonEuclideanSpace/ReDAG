@@ -69,7 +69,7 @@ def coverage(paths):
     return covered
 
 
-def missed_damage(paths, main, stress, drop, covered):
+def missed_damage(paths, main, stress, drop, covered, references=None):
     counts = defaultdict(lambda: defaultdict(Counter))
     for path in paths:
         for row in map(json.loads, open(path)):
@@ -97,7 +97,7 @@ def missed_damage(paths, main, stress, drop, covered):
         kinds = {k.split('_', 1)[1]: v for k, v in c.items() if k.startswith('unchecked_')}
         print('MISSED %-36s records %3d accepted steps %4d satisfied dependents %4d unchecked damaged %3d (steps %3d) checked damaged %3d by type %s' % (
             '/'.join(key), len(rows), c['accepted_steps'], c['satisfied_dependents'], c['unchecked'], c['steps_with_unchecked'], c['checked'], kinds))
-    references = {'main': 'redag_full', 'stress': 'stress_main/redag_full'}
+    references = references or {'main': 'redag_full', 'stress': 'stress_main/redag_full'}
     pooled = defaultdict(lambda: [Counter(), Counter(), 0, 0])
     for (group, run), rows in sorted(counts.items()):
         reference = counts.get((group, references[group]))
@@ -154,11 +154,14 @@ def main():
     parser.add_argument('--sessions', nargs='*', default=[])
     parser.add_argument('--cases', nargs='*', default=[])
     parser.add_argument('--drop', type=float, default=0.08)
+    parser.add_argument('--main_reference', default='redag_full')
+    parser.add_argument('--stress_reference', default='stress_main/redag_full')
     args = parser.parse_args()
     main_graphs, stress_graphs = graphs(args.data), graphs(args.stress_data)
     if args.steps:
         scored = {json.loads(line)['file'] for path in args.steps for line in open(path)}
-        missed_damage(args.steps, main_graphs, stress_graphs, args.drop, coverage([p for p in args.cases if Path(p).name in scored]))
+        missed_damage(args.steps, main_graphs, stress_graphs, args.drop, coverage([p for p in args.cases if Path(p).name in scored]),
+                      {'main': args.main_reference, 'stress': args.stress_reference})
     if args.sessions:
         stress_outcomes(args.sessions, stress_graphs)
 

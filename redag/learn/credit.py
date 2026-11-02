@@ -39,9 +39,6 @@ def compute_pairwise_advantages(rewards: List[float], delta_noise: float=0.015, 
 
 
 def credit_experiment(args, records, harness, controller, editor, planner, result, folder, cache=None):
-    """Experiment 2 diagnostics.  With a CaseCache (run_eval_benchmarks.py) every finished session is stored at once,
-    so a stopped run resumes at the next session; audit sampling uses a per-session RNG so it does not depend on
-    where a run was resumed."""
     from redag.harness.environment import run_record
     from redag.learn.rl_trainer import ablation_reward
     from redag.progress import report
