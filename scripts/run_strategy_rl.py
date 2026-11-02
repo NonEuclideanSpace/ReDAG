@@ -156,7 +156,7 @@ def summarize(rollouts):
     out = dict(rollouts=len(rollouts), states=len({r['state_id'] for r in rollouts}), reward=round(mean, 4),
                reward_ci95=round(1.96 * sd / math.sqrt(len(rewards)), 4), gain=round(sum(r['gain'] for r in rollouts) / len(rollouts), 4),
                generations=round(sum(r['generations'] for r in rollouts) / len(rollouts), 3))
-    for kind in ('route', 'accept'):
+    for kind in ('route', 'accept', 'retry'):
         items = [d for d in decisions if d['kind'] == kind]
         if items:
             out[kind + '_decisions'] = len(items)

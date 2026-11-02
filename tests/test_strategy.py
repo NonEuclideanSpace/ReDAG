@@ -2,7 +2,7 @@ from types import SimpleNamespace
 import torch
 from redag.graph.schema import CanvasState, ConditionDAG, ConditionNode, ControllerAction
 from redag.harness.environment import ReDAGHarness, run_record
-from redag.learn.strategy import ACCEPT_FEATURES, ROUTE_FEATURES, StrategyPolicy, default_weights, group_advantages, policy_gradient
+from redag.learn.strategy import ACCEPT_FEATURES, RETRY_FEATURES, ROUTE_FEATURES, StrategyPolicy, default_weights, group_advantages, policy_gradient
 from redag.verify.verifier import TwoStageVerifier
 
 
@@ -41,7 +41,7 @@ def test_strategy_routes_and_decides_only_ambiguous_trade_offs():
     first = harness.sample_group(state, dag, None, editor, 'b', group_size=1, seed=1)
     assert [d['kind'] for d in policy.log] == ['route', 'accept'] and first[0]['route'] == 'global' and not first[0]['accepted']
     assert len(policy.log[0]['features']) == len(ROUTE_FEATURES) and len(policy.log[1]['features']) == len(ACCEPT_FEATURES)
-    assert policy.log[1]['features'][2] > 0 and policy.log[1]['features'][1] == 0
+    assert policy.log[1]['features'][1] > 0 and policy.log[1]['features'][6] == 1.0
     harness.global_failures, policy.log = {}, []
     policy.weights['accept'][0] = 10.0
     second = harness.sample_group(state, dag, None, editor, 'b', group_size=1, seed=2)
@@ -82,3 +82,54 @@ def test_rl_sessions_are_selected_per_stratum_independent_of_file_order():
     assert [r['id'] for r in module.select_sessions(shuffled, 2, 0)] == [r['id'] for r in picked]
     assert sorted((r['kind'], r['k']) for r in picked) == sorted([(kind, k) for kind in ('t2i', 'i2i') for k in (10, 20)] * 2)
     assert not any(r['kind'] == 't2i' and len(r['turns']) < 2 for r in picked)
+
+
+def test_strategy_never_overrides_a_strict_count_change():
+    dag = ConditionDAG({'a': node('a', 'entity', 'Is there an apple?', 'apple', (0.1, 0.1, 0.3, 0.3)),
+                        'b': node('b', 'entity', 'Is there a banana?', 'banana', (0.6, 0.6, 0.9, 0.9))})
+    state = CanvasState(torch.zeros(3, 16, 16), {'a': 0.9, 'b': 0.1}, {'a'})
+    harness = ReDAGHarness(TwoStageVerifier(lambda image, question: 0.9), None)
+    policy = StrategyPolicy(dict(default_weights(), accept=[-30.0] * len(ACCEPT_FEATURES)), sample=False)
+    harness.strategy = policy
+    assert harness.strategy_acceptance(dag, ['b'], state, {'a': 0.9, 'b': 0.9}, {'a', 'b'}, 'local')
+    assert not harness.strategy_acceptance(dag, ['b'], state, {'a': 0.2, 'b': 0.2}, {'a', 'b'}, 'local')
+    assert harness.strategy_acceptance(dag, ['b'], state, {'a': 0.9, 'b': 0.4}, {'a', 'b'}, 'local')
+    assert policy.log == []
+    assert not harness.strategy_acceptance(dag, ['b'], state, {'a': 0.2, 'b': 0.9}, {'a', 'b'}, 'local')
+    assert [d['kind'] for d in policy.log] == ['accept'] and len(policy.log[0]['features']) == len(ACCEPT_FEATURES)
+
+
+def test_strategy_decides_whether_to_retry_a_rejected_turn_pass():
+    a = node('a', 'entity', 'Is there an apple?', 'apple', (0.1, 0.1, 0.3, 0.3))
+    b = node('b', 'entity', 'Is there a banana?', 'banana', scope='global')
+    record = {'kind': 'i2i', 'image': torch.zeros(3, 16, 16),
+              'turns': [{'user_prompt': 'keep the apple', 'graph': graph_dict(a)}, {'user_prompt': 'add a banana', 'graph': graph_dict(b)}]}
+    scores = lambda image, question: (0.2 if float(image.mean()) > 0.5 else 0.9) if 'apple' in question else (0.9 if float(image.mean()) > 0.5 else 0.1)
+    editor = SimpleNamespace(render=lambda image, act, seed=42: torch.ones(3, 16, 16))
+    controller = SimpleNamespace(sample=lambda *args, **kwargs: {'action': ControllerAction('add_entity', (0.5, 0.5, 0.9, 0.9), 'Add a banana.')})
+    for bias, routes in ((5.0, ['turn', 'turn']), (-5.0, ['turn', 'local'])):
+        weights = default_weights()
+        weights['retry'][0] = bias
+        policy = StrategyPolicy(weights, sample=False)
+        harness = ReDAGHarness(TwoStageVerifier(scores), None)
+        harness.turn_pass, harness.turn_retries, harness.strategy, harness.generation_budget = True, 2, policy, 5
+        state, dag, steps = run_record(record, harness, controller, editor, max_steps=2)
+        assert [s['route'] for s in steps] == routes
+        retries = [d for d in policy.log if d['kind'] == 'retry']
+        assert len(retries) == 1 and len(retries[0]['features']) == len(RETRY_FEATURES)
+
+
+def test_policy_files_with_another_schema_are_refused(tmp_path):
+    path = tmp_path / 'p.json'
+    StrategyPolicy().save(path)
+    assert StrategyPolicy.load(path).weights == default_weights()
+    import json
+    data = json.loads(path.read_text())
+    data['accept_features'] = data['accept_features'][:-1]
+    path.write_text(json.dumps(data))
+    try:
+        StrategyPolicy.load(path)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('schema mismatch accepted')
