@@ -65,3 +65,20 @@ def test_turn_start_hook_sees_every_turn_with_its_new_conditions():
     run_record(record, harness, controller, editor, max_steps=1)
     assert seen == [(0, 2, ['a'], ['a'], 'add an apple'), (1, 2, ['b'], ['a', 'b'], 'add a banana')]
     assert harness.budget_left() == 1.0
+
+
+def test_rl_sessions_are_selected_per_stratum_independent_of_file_order():
+    import importlib.util
+    import random
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('run_strategy_rl', Path(__file__).resolve().parents[1] / 'scripts' / 'run_strategy_rl.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    records = [dict(id=f'{kind}{k}-{i}', kind=kind, k=k, turns=[{}] * (1 if kind == 't2i' and i == 0 else 3))
+               for kind in ('t2i', 'i2i') for k in (10, 20) for i in range(5)]
+    picked = module.select_sessions(records, 2, 0)
+    shuffled = records[:]
+    random.Random(1).shuffle(shuffled)
+    assert [r['id'] for r in module.select_sessions(shuffled, 2, 0)] == [r['id'] for r in picked]
+    assert sorted((r['kind'], r['k']) for r in picked) == sorted([(kind, k) for kind in ('t2i', 'i2i') for k in (10, 20)] * 2)
+    assert not any(r['kind'] == 't2i' and len(r['turns']) < 2 for r in picked)
