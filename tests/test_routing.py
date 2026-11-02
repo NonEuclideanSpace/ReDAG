@@ -144,3 +144,53 @@ def test_turn_pass_runs_the_user_request_once_per_turn_and_counts_toward_the_bud
     record['kind'] = 't2i'
     harness, steps = run(True, 'joint')
     assert [s['route'] for s in steps] == ['local', 'turn']
+
+
+def test_rejected_turn_pass_is_retried_with_the_failed_requirements_spelled_out():
+    a = node('a', 'entity', 'Is there an apple?', 'apple', (0.1, 0.1, 0.3, 0.3))
+    b = node('b', 'entity', 'Is there a banana?', 'banana', scope='global')
+    record = {'kind': 'i2i', 'image': torch.zeros(3, 16, 16),
+              'turns': [{'user_prompt': 'keep the apple', 'graph': graph_dict(a)}, {'user_prompt': 'add a banana', 'graph': graph_dict(b)}]}
+    renders = []
+
+    def render(image, act, seed=42):
+        renders.append(act.instruction)
+        return torch.full((3, 16, 16), 0.8 if 'Also keep these true' in act.instruction else 0.6)
+
+    def scores(image, question):
+        level = float(image.mean())
+        if 'apple' in question:
+            return 0.9 if level < 0.5 or level > 0.7 else 0.2
+        return 0.9 if level > 0.5 else 0.1
+
+    editor = SimpleNamespace(render=render)
+    controller = SimpleNamespace(sample=lambda *args, **kwargs: {'action': ControllerAction('add_entity', (0.5, 0.5, 0.9, 0.9), 'Add a banana.')})
+    for retries, routes in ((1, ['turn', 'turn']), (0, ['turn', 'local'])):
+        renders.clear()
+        harness = configure_routing(ReDAGHarness(TwoStageVerifier(scores), None), SimpleNamespace(turn_pass=True, turn_retries=retries))
+        harness.generation_budget = 5
+        state, dag, steps = run_record(record, harness, controller, editor, max_steps=2)
+        assert [s['route'] for s in steps] == routes and not steps[0]['accepted']
+        if retries:
+            assert steps[1]['accepted'] and state.scores['b'] >= 0.7 and state.scores['a'] >= 0.7
+            assert renders[1] == 'add a banana. Keep everything else in the image unchanged. Also keep these true: there is an apple.'
+            assert harness.turn_retry_source(steps) is None
+
+
+def test_turn_priority_targets_the_new_request_before_older_open_conditions():
+    a = node('a', 'entity', 'Is there an apple?', 'apple', (0.1, 0.1, 0.3, 0.3))
+    c = node('c', 'entity', 'Is there a cherry?', 'cherry', (0.6, 0.6, 0.9, 0.9))
+    record = {'kind': 'i2i', 'image': torch.zeros(3, 16, 16),
+              'turns': [{'user_prompt': 'add an apple', 'graph': graph_dict(a)}, {'user_prompt': 'add a cherry', 'graph': graph_dict(a, c)}]}
+    targets = []
+
+    def sample(state, graph, target, **kwargs):
+        targets.append(target)
+        return {'action': ControllerAction('add_entity', graph.nodes[target].bbox, 'Add it.')}
+
+    editor = SimpleNamespace(render=lambda image, act, seed=42: torch.zeros(3, 16, 16))
+    for priority, expected in ((False, ['a', 'a']), (True, ['a', 'c'])):
+        targets.clear()
+        harness = configure_routing(ReDAGHarness(TwoStageVerifier(lambda image, question: 0.1), None), SimpleNamespace(turn_priority=priority))
+        run_record(record, harness, SimpleNamespace(sample=sample), editor, max_steps=1)
+        assert targets == expected
