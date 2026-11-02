@@ -612,6 +612,7 @@ def add_runtime_arguments(parser):
     parser.add_argument('--online_planner', action='store_true')
     parser.add_argument('--editor_kind', choices=('flux', 'pipeline'), default='flux')
     parser.add_argument('--editor_offload', action='store_true')
+    parser.add_argument('--editor_cfg', type=float)
     parser.add_argument('--scope_routing', action='store_true')
     parser.add_argument('--global_types', default=','.join(GLOBAL_ROUTE_TYPES))
     parser.add_argument('--global_gate', choices=('joint', 'mean'), default='joint')
@@ -635,6 +636,8 @@ def load_runtime(args, trainable_controller=False, trainable_editor=False):
         editor = FluxEditor.from_pretrained(args.editor_model, edit_device, torch.float32 if edit_device == 'cpu' else torch.bfloat16, args.editor_adapter, trainable_editor)
     if getattr(args, 'num_denoise_steps', None):
         editor.num_steps = args.num_denoise_steps
+    if getattr(args, 'editor_cfg', None) is not None:
+        editor.cfg_scale = args.editor_cfg
     editor.work_side = getattr(args, 'editor_work_side', 0) or None
     editor.context_pad = float(getattr(args, 'editor_context_pad', 0.0) or 0.0)
     verifier = TwoStageVerifier(load_vlm_scorer(args.verifier_model, verify_device, torch.float32 if verify_device == 'cpu' else torch.bfloat16))

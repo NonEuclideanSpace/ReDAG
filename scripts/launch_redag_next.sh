@@ -9,6 +9,9 @@ export CUDA_VISIBLE_DEVICES="${GPU}"
 export HF_HOME="${HF_HOME:-/root/autodl-tmp/hf_cache}"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 PYTHON="${PYTHON:-/root/miniconda3/bin/python}"
+PYQ21="${PYQ21:-/root/autodl-tmp/envs/dq21/bin/python}"
+MSCLI="${MSCLI:-/root/autodl-tmp/envs/dq21/bin/modelscope}"
+VIEW=/root/autodl-tmp/claude_view
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 M=/root/autodl-tmp/models
@@ -81,12 +84,87 @@ EOF
 }
 
 headroom() {
-  local vary="$1" samples="$2"
-  shift 2
-  note "start headroom ${vary} ${samples} $*"
-  "${PYTHON}" scripts/rl_headroom.py "${MODELS[@]}" --data data/final/rl_train.jsonl --samples "${samples}" --vary "${vary}" \
-    --num_denoise_steps 28 "$@" > "runs/logs/next_headroom_${vary}.log" 2>&1
-  note "done headroom ${vary} rc=$?"
+  local tag="$1" py="$2" vary="$3" samples="$4"
+  shift 4
+  note "start headroom ${tag} ${vary} ${samples}"
+  "${py}" scripts/rl_headroom.py "${MODELS[@]}" --data data/final/rl_train.jsonl --samples "${samples}" --vary "${vary}" \
+    --num_denoise_steps 28 "$@" > "runs/logs/next_headroom_${tag}.log" 2>&1
+  note "done headroom ${tag} rc=$?"
+}
+
+model_ready() {
+  [ -f "$1/.complete" ] || grep -q "DONE" "$2" 2>/dev/null
+}
+
+fetch_one() {
+  local repo="$1" dir="$2" log="$3"
+  if [ -f "${dir}/.complete" ] || grep -q "DONE" "${log}" 2>/dev/null; then
+    return 0
+  fi
+  mkdir -p "${dir}"
+  MODELSCOPE_CACHE=/root/autodl-tmp/ms_cache "${MSCLI}" download --model "${repo}" --local-dir "${dir}" --max-workers 8 > "${log}" 2>&1 \
+    && touch "${dir}/.complete" && echo DONE >> "${log}"
+}
+
+fetch_models() {
+  if pgrep -f "modelscope download" > /dev/null; then
+    return 0
+  fi
+  mkdir -p "${VIEW}" /root/autodl-tmp/ms_cache
+  nohup bash -c "$(declare -f fetch_one); MSCLI=${MSCLI}; fetch_one Qwen/Qwen-Image-2.1 ${M}/Qwen/Qwen-Image-2.1 ${VIEW}/dl_q21.log; \
+    fetch_one Qwen/Qwen-Image-Edit-2511 ${M}/Qwen/Qwen-Image-Edit-2511 ${VIEW}/dl_2511.log" > /dev/null 2>&1 &
+  note "model downloads started"
+}
+
+wait_ready() {
+  local dir="$1" log="$2" minutes="$3" waited=0
+  while ! model_ready "${dir}" "${log}"; do
+    if [ "${waited}" -ge "${minutes}" ]; then
+      return 1
+    fi
+    sleep 60
+    waited=$((waited + 1))
+  done
+}
+
+CTRL=(--controller_adapter runs/sft/controller --editor_context_pad 0.25)
+PIPE=(--editor_kind pipeline --num_denoise_steps 40)
+
+pilot_flux_zero() {
+  headroom flux_zero "${PYTHON}" editor 4 "${CTRL[@]}" --limit 40 --out runs/eval/headroom_flux_zero_editor.jsonl
+}
+
+pilot_q21() {
+  if wait_ready "${M}/Qwen/Qwen-Image-2.1" "${VIEW}/dl_q21.log" "${1:-90}"; then
+    headroom qwen21 "${PYQ21}" editor 4 "${CTRL[@]}" "${PIPE[@]}" --editor_cfg 1.0 --editor_model "${M}/Qwen/Qwen-Image-2.1" \
+      --limit 40 --out runs/eval/headroom_qwen21_editor.jsonl
+  else
+    note "skip qwen21 pilot: weights incomplete"
+  fi
+}
+
+pilot_2511() {
+  if wait_ready "${M}/Qwen/Qwen-Image-Edit-2511" "${VIEW}/dl_2511.log" "${1:-120}"; then
+    headroom qwen2511 "${PYTHON}" editor 2 "${CTRL[@]}" "${PIPE[@]}" --editor_offload --editor_cfg 4.0 \
+      --editor_model "${M}/Qwen/Qwen-Image-Edit-2511" --limit 40 --out runs/eval/headroom_qwen2511_editor.jsonl
+  else
+    note "skip 2511 pilot: weights incomplete"
+  fi
+}
+
+bakeoff_report() {
+  "${PYTHON}" scripts/bakeoff_report.py --reference flux_sft --out runs/eval/bakeoff_summary.json --runs \
+    flux_sft=runs/eval/headroom_flux_sft_editor.jsonl flux_zero=runs/eval/headroom_flux_zero_editor.jsonl \
+    qwen21=runs/eval/headroom_qwen21_editor.jsonl qwen2511=runs/eval/headroom_qwen2511_editor.jsonl > runs/logs/next_bakeoff.log 2>&1
+  note "bakeoff report rc=$?"
+}
+
+bakeoff() {
+  headroom flux_sft "${PYTHON}" editor 8 "${SFT[@]}" --limit 40 --out runs/eval/headroom_flux_sft_editor.jsonl
+  pilot_flux_zero
+  pilot_q21 90
+  pilot_2511 120
+  bakeoff_report
 }
 
 case "${TASK}" in
@@ -94,12 +172,14 @@ case "${TASK}" in
   budget) eval_variant budget "${ARG3:-0}" i2i ;;
   mean) eval_variant mean "${ARG3:-0}" i2i "${MEAN[@]}" ;;
   silent) silent_scores "${ARG3:-.}" ;;
-  headroom_editor) headroom editor 8 "${SFT[@]}" --limit 80 --out runs/eval/headroom_flux_sft_editor.jsonl ;;
-  headroom_controller) headroom controller 4 "${SFT[@]}" --limit 80 --out runs/eval/headroom_flux_sft_controller.jsonl ;;
-  pilot_2511)
-    headroom editor 4 --controller_adapter runs/sft/controller --editor_kind pipeline --editor_offload --editor_context_pad 0.25 \
-      --editor_model "${M}/Qwen/Qwen-Image-Edit-2511" --limit 40 --out runs/eval/headroom_qwen2511_editor.jsonl
-    ;;
+  headroom_editor) headroom flux_sft "${PYTHON}" editor 8 "${SFT[@]}" --limit 40 --out runs/eval/headroom_flux_sft_editor.jsonl ;;
+  headroom_controller) headroom flux_sft_ctrl "${PYTHON}" controller 4 "${SFT[@]}" --limit 40 --out runs/eval/headroom_flux_sft_controller.jsonl ;;
+  pilot_flux_zero) pilot_flux_zero ;;
+  pilot_q21) pilot_q21 0 ;;
+  pilot_2511) pilot_2511 0 ;;
+  bakeoff) bakeoff ;;
+  bakeoff_report) bakeoff_report ;;
+  fetch) fetch_models ;;
   chain902_gpu0)
     eval_variant full 0 "" "${FULL[@]}"
     eval_variant full 1 "" "${FULL[@]}"
@@ -114,15 +194,10 @@ case "${TASK}" in
     for s in 0 1 2 10; do eval_variant mean "${s}" i2i "${MEAN[@]}"; done
     ;;
   chain917)
+    fetch_models
+    bakeoff
     silent_scores rl_counterfactual
-    headroom editor 8 "${SFT[@]}" --limit 80 --out runs/eval/headroom_flux_sft_editor.jsonl
-    headroom controller 4 "${SFT[@]}" --limit 80 --out runs/eval/headroom_flux_sft_controller.jsonl
-    if grep -q "^DONE" /root/autodl-tmp/claude_view/dl_2511.log 2>/dev/null; then
-      headroom editor 4 --controller_adapter runs/sft/controller --editor_kind pipeline --editor_offload --editor_context_pad 0.25 \
-        --editor_model "${M}/Qwen/Qwen-Image-Edit-2511" --limit 40 --out runs/eval/headroom_qwen2511_editor.jsonl
-    else
-      note "skip 2511 pilot: weights incomplete"
-    fi
+    headroom flux_sft_ctrl "${PYTHON}" controller 4 "${SFT[@]}" --limit 40 --out runs/eval/headroom_flux_sft_controller.jsonl
     ;;
   start902)
     for g in 0 1 2; do
@@ -133,6 +208,6 @@ case "${TASK}" in
     nohup bash scripts/launch_redag_next.sh chain917 0 > runs/logs/next_chain917.log 2>&1 &
     ;;
   *)
-    echo "tasks: full <shard> | budget <shard> | mean <shard> | silent | headroom_editor | headroom_controller | pilot_2511 | start902 | start917"
+    echo "tasks: full <shard> | budget <shard> | mean <shard> | silent | headroom_editor | headroom_controller | pilot_flux_zero | pilot_q21 | pilot_2511 | bakeoff | bakeoff_report | fetch | start902 | start917"
     ;;
 esac

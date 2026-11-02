@@ -351,9 +351,12 @@ class PipelineEditor:
         generator = torch.Generator(device="cpu").manual_seed(int(seed))
         kwargs = dict(prompt=instruction, num_inference_steps=self.num_steps, generator=generator)
         kwargs["image"] = [image] if "true_cfg_scale" in accepted else image
+        guided = self.cfg_scale is not None and self.cfg_scale > 1
         if "true_cfg_scale" in accepted:
-            kwargs.update(true_cfg_scale=self.cfg_scale, negative_prompt=" ")
-        elif "guidance_scale" in accepted:
+            kwargs["true_cfg_scale"] = self.cfg_scale if guided else 1.0
+            if guided:
+                kwargs["negative_prompt"] = " "
+        elif "guidance_scale" in accepted and self.cfg_scale is not None:
             kwargs["guidance_scale"] = self.cfg_scale
         return self.pipeline(**{k: v for k, v in kwargs.items() if k in accepted}).images[0]
 
