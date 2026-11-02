@@ -99,6 +99,15 @@ def turn_instruction(request):
     return request + '. Keep everything else in the image unchanged.'
 
 
+def retry_instruction(request, dag, undrawn, dropped, limit=3):
+    text = turn_instruction(request)
+    if undrawn:
+        text += ' Make sure that ' + '; '.join(requirement_statement(dag.nodes[n]) for n in undrawn[:limit]) + '.'
+    if dropped:
+        text += ' Also keep these true: ' + '; '.join(requirement_statement(dag.nodes[n]) for n in dropped[:limit]) + '.'
+    return text
+
+
 def consistent_count(dag, scores, nodes):
     parents = {nid: set(node.depends_on) for nid, node in dag.nodes.items()}
     for u, v in dag.comp_edges + dag.supp_edges:
@@ -141,6 +150,7 @@ class ReDAGHarness:
         self.turn_request, self.turn_nodes, self.turn_index, self.draft_first_turn = '', set(), 0, False
         self.global_retries, self.global_failures = 0, {}
         self.strategy, self.local_failures, self.turn_count, self.on_turn_start = None, {}, 1, None
+        self.turn_retries, self.turn_priority = 0, False
 
     def budget_left(self):
         if self.render_limit is None or not self.generation_budget:
@@ -186,7 +196,15 @@ class ReDAGHarness:
         union = expand_bbox_with_margin(union, 1.25)
         return CANVAS if box_area(union) >= WHOLE_CANVAS_SHARE else union
 
-    def turn_candidates(self, state, dag, editor, targets, seed):
+    def turn_retry_source(self, records):
+        rejected = 0
+        for record in reversed(records):
+            if record.get('route') != 'turn' or record['accepted']:
+                break
+            rejected += 1
+        return records[-1] if 0 < rejected <= self.turn_retries else None
+
+    def turn_candidates(self, state, dag, editor, targets, seed, previous=None):
         if self.render_limit is not None and self.generation_counter >= self.render_limit:
             return []
         if self.verifier.call_limit is not None and self.verifier.call_counter >= self.verifier.call_limit:
@@ -194,7 +212,13 @@ class ReDAGHarness:
         if self.cost_budget is not None and self.cost_origin is not None and self.spent_cost() >= self.cost_budget:
             return []
         graph = deepcopy(dag)
-        action = ControllerAction('modify_attr', self.turn_box(graph, targets), turn_instruction(self.turn_request))
+        instruction = turn_instruction(self.turn_request)
+        if previous is not None:
+            seen = previous['raw_scores']
+            undrawn = [n for n in targets if seen.get(n, 0.0) < graph.nodes[n].threshold]
+            dropped = sorted(n for n in previous['parent_state'].protected_set if n in graph.nodes and seen.get(n, 1.0) < graph.nodes[n].threshold)
+            instruction = retry_instruction(self.turn_request, graph, undrawn, dropped)
+        action = ControllerAction('modify_attr', self.turn_box(graph, targets), instruction)
         self.generation_counter += 1
         crop = editor.render(state.image, action, seed=seed)
         try:
@@ -496,15 +520,16 @@ class ReDAGHarness:
                 if self.unknown_nodes:
                     reason = 'execution_budget'
                     break
-                turn_targets = self.turn_targets(dag, state) if step == 0 else []
+                retry = self.turn_retry_source(records)
+                turn_targets = self.turn_targets(dag, state) if step == 0 or retry is not None else []
                 frontier = self.active_frontier(dag, state.scores)
                 if not frontier and not turn_targets:
                     reason = 'satisfied' if all(state.scores[n] >= dag.nodes[n].threshold for n in dag.nodes) else 'blocked_frontier'
                     break
-                frontier.sort(key=lambda nid: failures.get(nid, 0) >= self.retry_limit)
+                frontier.sort(key=lambda nid: (failures.get(nid, 0) >= self.retry_limit, self.turn_priority and nid not in self.turn_nodes))
                 group_calls, group_renders = self.verifier.call_counter, self.generation_counter
                 if turn_targets:
-                    candidates = self.turn_candidates(state, dag, editor, turn_targets, seed + step * group_size)
+                    candidates = self.turn_candidates(state, dag, editor, turn_targets, seed + step * group_size, previous=retry)
                 else:
                     candidates = self.sample_group(state, dag, controller, editor, frontier[0], group_size, seed + step * group_size)
                 if not candidates:
@@ -674,6 +699,8 @@ def add_runtime_arguments(parser):
     parser.add_argument('--user_text', action='store_true')
     parser.add_argument('--turn_pass', action='store_true')
     parser.add_argument('--turn_gate', choices=('joint', 'mean', 'net'), default='joint')
+    parser.add_argument('--turn_retries', type=int, default=0)
+    parser.add_argument('--turn_priority', action='store_true')
     parser.add_argument('--strategy_policy')
     return parser
 
@@ -721,6 +748,8 @@ def configure_routing(harness, args):
     harness.user_text = bool(getattr(args, 'user_text', False))
     harness.turn_pass = bool(getattr(args, 'turn_pass', False))
     harness.turn_gate = getattr(args, 'turn_gate', 'joint')
+    harness.turn_retries = int(getattr(args, 'turn_retries', 0) or 0)
+    harness.turn_priority = bool(getattr(args, 'turn_priority', False))
     if getattr(args, 'strategy_policy', None):
         from redag.learn.strategy import StrategyPolicy
         harness.strategy = StrategyPolicy.load(args.strategy_policy, sample=False)
