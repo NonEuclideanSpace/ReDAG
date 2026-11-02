@@ -134,9 +134,10 @@ def compute_affected_subgraph(dag: ConditionDAG, action: ControllerAction, targe
     neighbors = get_int_neighbors(dag, affected) - affected
     affected |= neighbors | get_dependency_descendants(dag, neighbors)
     phrases = {dag.nodes[nid].entity_phrase for nid in touched if dag.nodes[nid].node_type in ('entity', 'count')}
-    return affected | {nid for nid, node in dag.nodes.items()
-                       if (node.node_type == 'count' and node.entity_phrase in phrases)
-                       or (node.node_type == 'prohibition' and nid in protected)}
+    extra = {nid for nid, node in dag.nodes.items()
+             if (node.node_type == 'count' and node.entity_phrase in phrases)
+             or (node.node_type == 'prohibition' and nid in protected)} - affected
+    return affected | extra | get_dependency_descendants(dag, extra)
 
 
 def compute_active_frontier(dag: ConditionDAG, scores: Dict[str, float], gate_tau: float=0.5, gated: bool=True) -> List[str]:

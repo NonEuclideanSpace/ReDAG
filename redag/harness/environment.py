@@ -108,15 +108,46 @@ def retry_instruction(request, dag, undrawn, dropped, limit=3):
     return text
 
 
-def consistent_count(dag, scores, nodes):
+def logical_parents(dag):
     parents = {nid: set(node.depends_on) for nid, node in dag.nodes.items()}
     for u, v in dag.comp_edges + dag.supp_edges:
-        parents[v].add(u)
+        if v in parents:
+            parents[v].add(u)
+    return {v: {p for p in ps if p in dag.nodes and p != v} for v, ps in parents.items()}
+
+
+def valid_nodes(dag, scores):
+    parents, memo = logical_parents(dag), {}
+
+    def valid(v, stack=()):
+        if v not in memo:
+            memo[v] = scores.get(v, 0.0) >= dag.nodes[v].threshold and all(valid(p, stack + (v,)) for p in parents[v] if p not in stack)
+        return memo[v]
+    return {v for v in dag.nodes if valid(v)}
+
+
+def consistent_count(dag, scores, nodes=None):
+    valid = valid_nodes(dag, scores)
+    return len(valid) if nodes is None else sum(1 for v in nodes if v in valid)
+
+
+def direct_consistent_count(dag, scores, nodes):
+    parents = logical_parents(dag)
     ok = lambda v: scores.get(v, 0.0) >= dag.nodes[v].threshold
     return sum(1 for v in nodes if ok(v) and all(ok(p) for p in parents[v]))
 
 
+def net_progress_acceptance(dag, targets, prev_scores, new_scores, min_target_gain=0.05):
+    before, after = valid_nodes(dag, prev_scores), valid_nodes(dag, new_scores)
+    if len(after) != len(before):
+        return len(after) > len(before)
+    damaged = any(prev_scores.get(v, 0.0) >= dag.nodes[v].threshold > new_scores.get(v, 0.0) for v in dag.nodes)
+    return not damaged and any(new_scores[t] - prev_scores[t] >= min_target_gain for t in targets)
+
+
 def joint_acceptance(dag, targets, prev_scores, new_scores, protected_set, affected, min_target_gain=0.05, gate='joint'):
+    if gate == 'net2':
+        return net_progress_acceptance(dag, targets, prev_scores, new_scores, min_target_gain)
     target_ok = any(new_scores[t] - prev_scores[t] >= min_target_gain or new_scores[t] >= dag.nodes[t].threshold for t in targets)
     gain = sum(dag.nodes[v].weight * (new_scores[v] - prev_scores[v]) for v in affected)
     if not target_ok or gain <= 0:
@@ -124,7 +155,7 @@ def joint_acceptance(dag, targets, prev_scores, new_scores, protected_set, affec
     if gate == 'mean':
         return True
     if gate == 'net':
-        return consistent_count(dag, new_scores, affected) > consistent_count(dag, prev_scores, affected)
+        return direct_consistent_count(dag, new_scores, affected) > direct_consistent_count(dag, prev_scores, affected)
     return all(new_scores[v] >= dag.nodes[v].threshold for v in protected_set & affected)
 
 
@@ -150,7 +181,7 @@ class ReDAGHarness:
         self.turn_request, self.turn_nodes, self.turn_index, self.draft_first_turn = '', set(), 0, False
         self.global_retries, self.global_failures = 0, {}
         self.strategy, self.local_failures, self.turn_count, self.on_turn_start = None, {}, 1, None
-        self.turn_retries, self.turn_priority = 0, False
+        self.turn_retries, self.turn_priority, self.local_gate = 0, False, 'legacy'
 
     def budget_left(self):
         if self.render_limit is None or not self.generation_budget:
@@ -169,7 +200,7 @@ class ReDAGHarness:
         drops = {v for v in parent_state.protected_set & affected if new_scores[v] < threshold(v)}
         this_turn = sum(1 for v in drops if v in self.turn_nodes)
         descendants = (get_dependency_descendants(dag, drops) - drops) & parent_state.protected_set if drops else set()
-        net = consistent_count(dag, new_scores, affected) - consistent_count(dag, parent_state.scores, affected)
+        net = consistent_count(dag, new_scores) - consistent_count(dag, parent_state.scores)
         hits = sum(1 for t in targets if new_scores[t] >= threshold(t))
         gain = sum(dag.nodes[v].weight * (new_scores[v] - parent_state.scores[v]) for v in affected) / max(1, len(affected))
         clip = lambda x: max(-3.0, min(3.0, float(x))) / 3
@@ -378,6 +409,8 @@ class ReDAGHarness:
         elif joint:
             accepted = joint_acceptance(graph, targets, parent_state.scores, raw_scores, parent_state.protected_set, affected,
                                         self.config.min_target_gain, self.turn_gate if route == 'turn' else self.global_gate)
+        elif self.local_gate == 'net2':
+            accepted = net_progress_acceptance(graph, targets, parent_state.scores, raw_scores, self.config.min_target_gain)
         else:
             accepted = check_local_acceptance(graph, target_node_id, parent_state.scores, raw_scores, parent_state.protected_set, affected,
                                              self.config.min_target_gain, self.config.max_protected_drop)
@@ -488,7 +521,7 @@ class ReDAGHarness:
                     sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, with_user_request(sample['action'].instruction, snippet))
                 sample['route'] = route
                 mask = None if route == 'global' else self.editable_mask(state, graph, target_node_id, sample['action'])
-                crop, editable = self.render(editor, state, sample['action'], seed, mask)
+                crop, editable = self.render(editor, state, sample['action'], seed + index, mask)
                 try:
                     self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop, editable, route=route)
                 except RuntimeError as error:
@@ -694,11 +727,12 @@ def add_runtime_arguments(parser):
     parser.add_argument('--editor_cfg', type=float)
     parser.add_argument('--scope_routing', action='store_true')
     parser.add_argument('--global_types', default=','.join(GLOBAL_ROUTE_TYPES))
-    parser.add_argument('--global_gate', choices=('joint', 'mean', 'net'), default='joint')
+    parser.add_argument('--global_gate', choices=('joint', 'mean', 'net', 'net2'), default='joint')
+    parser.add_argument('--local_gate', choices=('legacy', 'net2'), default='legacy')
     parser.add_argument('--global_retries', type=int, default=0)
     parser.add_argument('--user_text', action='store_true')
     parser.add_argument('--turn_pass', action='store_true')
-    parser.add_argument('--turn_gate', choices=('joint', 'mean', 'net'), default='joint')
+    parser.add_argument('--turn_gate', choices=('joint', 'mean', 'net', 'net2'), default='joint')
     parser.add_argument('--turn_retries', type=int, default=0)
     parser.add_argument('--turn_priority', action='store_true')
     parser.add_argument('--strategy_policy')
@@ -750,6 +784,7 @@ def configure_routing(harness, args):
     harness.turn_gate = getattr(args, 'turn_gate', 'joint')
     harness.turn_retries = int(getattr(args, 'turn_retries', 0) or 0)
     harness.turn_priority = bool(getattr(args, 'turn_priority', False))
+    harness.local_gate = getattr(args, 'local_gate', 'legacy') or 'legacy'
     if getattr(args, 'strategy_policy', None):
         from redag.learn.strategy import StrategyPolicy
         harness.strategy = StrategyPolicy.load(args.strategy_policy, sample=False)

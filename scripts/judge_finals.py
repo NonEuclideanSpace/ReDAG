@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -28,6 +29,11 @@ def load_scorer(model_id, device):
     return score
 
 
+def final_digest(case):
+    image = Path(case['views'][case['final']]['image'])
+    return hashlib.sha1(image.read_bytes()).hexdigest() if image.exists() else None
+
+
 def pending_cases(paths, done):
     for path in map(Path, paths):
         for line in path.read_text(encoding='utf-8').splitlines()[1:]:
@@ -35,8 +41,9 @@ def pending_cases(paths, done):
                 row = json.loads(line)
             except ValueError:
                 continue
-            if (path.name, row['key']) not in done:
-                yield path.name, row
+            digest = final_digest(row['case'])
+            if (path.name, row['key'], digest) not in done and (path.name, row['key'], None) not in done:
+                yield path.name, row, digest
 
 
 def main():
@@ -47,14 +54,14 @@ def main():
     parser.add_argument('--device', default='cuda')
     args = parser.parse_args()
     out_path = Path(args.out)
-    done = {(row.get('file'), row.get('key')) for row in map(json.loads, out_path.open())} if out_path.exists() else set()
+    done = {(row.get('file'), row.get('key'), row.get('image_sha1')) for row in map(json.loads, out_path.open())} if out_path.exists() else set()
     pending = list(pending_cases(args.cases, done))
     print('pending finals', len(pending), flush=True)
     if not pending:
         return
     scorer = load_scorer(args.model, args.device)
     with out_path.open('a') as out:
-        for name, row in pending:
+        for name, row, digest in pending:
             case = row['case']
             view = case['views'][case['final']]
             scores, nodes = score_view(view, scorer), view['nodes']
@@ -62,7 +69,7 @@ def main():
             satisfied = sum(scores[nid] >= node['threshold'] for nid, node in nodes.items())
             out.write(json.dumps(dict(id=case['id'], file=name, key=row['key'], group=case['group'], scores=scores, k=len(nodes),
                                       s_final=sum(node['weight'] * scores[nid] for nid, node in nodes.items()) / weight,
-                                      satisfied=satisfied, all_satisfied=satisfied == len(nodes))) + '\n')
+                                      satisfied=satisfied, all_satisfied=satisfied == len(nodes), image_sha1=digest)) + '\n')
             out.flush()
 
 

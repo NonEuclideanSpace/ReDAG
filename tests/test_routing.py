@@ -2,8 +2,9 @@ from types import SimpleNamespace
 import torch
 from redag.graph.dag import CANVAS
 from redag.graph.schema import CanvasState, ConditionDAG, ConditionNode, ControllerAction
-from redag.harness.environment import (ReDAGHarness, configure_routing, consistent_count, joint_acceptance, request_snippet, route_class,
-                                       run_record, with_user_request)
+from redag.graph.dag import compute_affected_subgraph
+from redag.harness.environment import (ReDAGHarness, configure_routing, consistent_count, direct_consistent_count, joint_acceptance,
+                                       net_progress_acceptance, request_snippet, route_class, run_record, valid_nodes, with_user_request)
 from redag.verify.verifier import TwoStageVerifier
 
 
@@ -194,3 +195,66 @@ def test_turn_priority_targets_the_new_request_before_older_open_conditions():
         harness = configure_routing(ReDAGHarness(TwoStageVerifier(lambda image, question: 0.1), None), SimpleNamespace(turn_priority=priority))
         run_record(record, harness, SimpleNamespace(sample=sample), editor, max_steps=1)
         assert targets == expected
+
+
+def chain_dag():
+    nodes = {'a': node('a', 'entity', 'a', 'a'), 'b': node('b', 'attribute', 'b', 'a', depends_on=['a']),
+             'c': node('c', 'attribute', 'c', 'a', depends_on=['b']), 'd': node('d', 'attribute', 'd', 'a', depends_on=['c'])}
+    nodes.update({k: node(k, 'entity', k, k) for k in 'efg'})
+    return ConditionDAG(nodes)
+
+
+def test_consistency_is_recursive_over_the_whole_graph():
+    dag = chain_dag()
+    before = dict.fromkeys('abcd', 0.71) | dict.fromkeys('efg', 0.69)
+    after = dict(a=0.69, b=0.71, c=0.71, d=0.71) | dict.fromkeys('efg', 0.99)
+    assert consistent_count(dag, before) == 4 and consistent_count(dag, after) == 3 and valid_nodes(dag, after) == set('efg')
+    assert direct_consistent_count(dag, after, dag.nodes) == 5
+    assert not net_progress_acceptance(dag, ['e'], before, after)
+    assert consistent_count(dag, after, {'c', 'd', 'e'}) == 1
+    diamond = ConditionDAG({'p': node('p', 'entity', 'p', 'p'), 'q': node('q', 'entity', 'q', 'q'),
+                            'r': node('r', 'relation', 'r', 'p', depends_on=['p', 'q']), 's': node('s', 'attribute', 's', 'p', depends_on=['r'])})
+    scores = dict(p=0.9, q=0.5, r=0.9, s=0.9)
+    assert valid_nodes(diamond, scores) == {'p'} and consistent_count(diamond, dict(scores, q=0.9)) == 4
+
+
+def test_net2_gate_counts_and_never_trades_down():
+    dag = ConditionDAG({'x': node('x', 'entity', 'x', 'x'), 'y': node('y', 'entity', 'y', 'y')})
+    before, after = dict(x=0.69, y=0.99), dict(x=0.71, y=0.70)
+    assert consistent_count(dag, before) == 1 and consistent_count(dag, after) == 2
+    assert net_progress_acceptance(dag, ['x'], before, after)
+    assert not joint_acceptance(dag, ['x'], before, after, {'y'}, {'x', 'y'}, gate='net')
+    assert joint_acceptance(dag, ['x'], before, after, {'y'}, {'x', 'y'}, gate='net2')
+    assert net_progress_acceptance(dag, ['x'], before, dict(before, x=0.6)) is False
+    assert net_progress_acceptance(dag, ['x'], dict(x=0.3, y=0.99), dict(x=0.5, y=0.98))
+    assert not net_progress_acceptance(dag, ['x'], dict(x=0.3, y=0.99), dict(x=0.5, y=0.6))
+    swap = ConditionDAG({**dag.nodes, 'z': node('z', 'entity', 'z', 'z')})
+    assert not net_progress_acceptance(swap, ['x'], dict(x=0.3, y=0.99, z=0.9), dict(x=0.9, y=0.5, z=0.9))
+
+
+def test_all_routes_share_the_net2_decision():
+    dag = ConditionDAG({'cup': node('cup', 'entity', 'Is there a cup?', 'cup', (0.1, 0.1, 0.4, 0.4)),
+                        'mug': node('mug', 'entity', 'Is there a mug?', 'mug', (0.5, 0.5, 0.9, 0.9)),
+                        'tea': node('tea', 'entity', 'Is there tea?', 'tea', (0.5, 0.1, 0.9, 0.4))})
+    state = CanvasState(torch.zeros(3, 16, 16), {'cup': 0.72, 'mug': 0.95, 'tea': 0.1}, {'cup', 'mug'})
+    bright = lambda image: float(image.mean()) > 0.5
+    scores = lambda image, question: (0.9 if bright(image) else 0.1) if 'tea' in question else (0.69 if bright(image) else 0.72) if 'cup' in question else 0.95
+    decisions = []
+    for route in ('local', 'global', 'turn'):
+        harness = configure_routing(ReDAGHarness(TwoStageVerifier(scores), None),
+                                    SimpleNamespace(turn_gate='net2', global_gate='net2', local_gate='net2'))
+        action = ControllerAction('add_entity', (0.0, 0.0, 1.0, 1.0), 'Add tea.')
+        harness.evaluate_candidate_action(state, dag, 'tea', action, torch.ones(3, 16, 16), None, route=route, targets=['tea'])
+        decisions.append(harness.last_candidate['accepted'])
+    assert decisions == [False, False, False]
+    harness = configure_routing(ReDAGHarness(TwoStageVerifier(scores), None), SimpleNamespace())
+    harness.evaluate_candidate_action(state, dag, 'tea', ControllerAction('add_entity', (0.0, 0.0, 1.0, 1.0), 'Add tea.'), torch.ones(3, 16, 16), None, route='local')
+    assert harness.last_candidate['accepted']
+
+
+def test_affected_set_closes_over_children_of_count_and_prohibition_nodes():
+    dag = ConditionDAG({'dog': node('dog', 'entity', 'Is there a dog?', 'dog', (0.1, 0.1, 0.4, 0.4)),
+                        'two': node('two', 'count', 'Are there two dogs?', 'dog', scope='global'),
+                        'kid': node('kid', 'relation', 'Is a kid next to the two dogs?', 'kid', scope='global', depends_on=['two'])})
+    affected = compute_affected_subgraph(dag, ControllerAction('modify_attr', (0.1, 0.1, 0.4, 0.4), 'Edit the dog.'), 'dog')
+    assert {'dog', 'two', 'kid'} <= affected
