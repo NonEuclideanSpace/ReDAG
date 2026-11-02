@@ -185,7 +185,7 @@ class ReDAGHarness:
         self.turn_request, self.turn_nodes, self.turn_index, self.draft_first_turn = '', set(), 0, False
         self.global_retries, self.global_failures = 0, {}
         self.strategy, self.local_failures, self.turn_count, self.on_turn_start = None, {}, 1, None
-        self.turn_retries, self.turn_priority, self.local_gate, self.turn_localize = 0, False, 'legacy', False
+        self.turn_retries, self.turn_priority, self.local_gate, self.turn_localize, self.turn_protect = 0, False, 'legacy', False, False
 
     def budget_left(self):
         if self.render_limit is None or not self.generation_budget:
@@ -314,9 +314,9 @@ class ReDAGHarness:
             instruction = retry_instruction(self.turn_request, graph, undrawn, dropped)
         action = ControllerAction('modify_attr', self.turn_box(graph, targets, state.image, state.scores), instruction)
         self.generation_counter += 1
-        crop = editor.render(state.image, action, seed=seed)
+        crop, editable = self.render(editor, state, action, seed, self.turn_mask(state, graph, targets, action))
         try:
-            self.evaluate_candidate_action(state, graph, targets[0], action, crop, None, route='turn', targets=targets)
+            self.evaluate_candidate_action(state, graph, targets[0], action, crop, editable, route='turn', targets=targets)
         except RuntimeError as error:
             if str(error) != 'Verifier call budget exhausted':
                 raise
@@ -507,8 +507,28 @@ class ReDAGHarness:
                 keep.add(nid)
             elif dag.nodes[nid].node_type == 'attribute':
                 keep.update(p for p in condition_parents(dag, nid) if dag.nodes[p].node_type == 'entity' and p not in free)
+        return self.editable_from(state, keep, action.box)
+
+    def turn_mask(self, state, dag, targets, action):
+        if not self.turn_protect or self.grounder is None or self.mode != 'redag_full':
+            return None
+        free = set(targets) | {p for t in targets for p in condition_parents(dag, t)}
+        free |= get_int_neighbors(dag, free)
+        phrases = {dag.nodes[t].entity_phrase for t in targets if dag.nodes[t].node_type in ('count', 'prohibition')}
+        free |= {nid for nid, node in dag.nodes.items() if node.entity_phrase in phrases}
+        keep = set()
+        for nid in state.protected_set & set(dag.nodes):
+            if nid in free:
+                continue
+            if dag.nodes[nid].node_type == 'entity':
+                keep.add(nid)
+            elif dag.nodes[nid].node_type == 'attribute':
+                keep.update(p for p in condition_parents(dag, nid) if dag.nodes[p].node_type == 'entity' and p not in free)
+        return self.editable_from(state, keep, action.box)
+
+    def editable_from(self, state, keep, box):
         height, width = state.image.shape[-2:]
-        x1, y1, x2, y2 = defnorm_box_to_pixel_slice(action.box, height, width)
+        x1, y1, x2, y2 = defnorm_box_to_pixel_slice(box, height, width)
         window = (slice(y1, y2), slice(x1, x2))
         layers = []
         for nid in sorted(keep):
@@ -797,6 +817,7 @@ def add_runtime_arguments(parser):
     parser.add_argument('--turn_retries', type=int, default=0)
     parser.add_argument('--turn_priority', action='store_true')
     parser.add_argument('--turn_localize', action='store_true')
+    parser.add_argument('--turn_protect', action='store_true')
     parser.add_argument('--strategy_policy')
     return parser
 
@@ -848,6 +869,7 @@ def configure_routing(harness, args):
     harness.turn_priority = bool(getattr(args, 'turn_priority', False))
     harness.local_gate = getattr(args, 'local_gate', 'legacy') or 'legacy'
     harness.turn_localize = bool(getattr(args, 'turn_localize', False))
+    harness.turn_protect = bool(getattr(args, 'turn_protect', False))
     if getattr(args, 'strategy_policy', None):
         from redag.learn.strategy import StrategyPolicy
         harness.strategy = StrategyPolicy.load(args.strategy_policy, sample=False)
