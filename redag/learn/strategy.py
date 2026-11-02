@@ -8,8 +8,10 @@ ROUTE_CLASSES = ('local', 'relation_local', 'relation_wide', 'background', 'glob
 GLOBAL_DEFAULT = ('background', 'global', 'relation_wide', 'count', 'prohibition')
 ROUTE_FEATURES = ('bias',) + tuple('type=' + t for t in NODE_TYPES) + tuple('class=' + c for c in ROUTE_CLASSES) + (
     'global_failures', 'local_failures', 'target_score', 'last_turn', 'budget_left')
-ACCEPT_FEATURES = ('bias', 'net_consistent', 'drops', 'drops_this_turn', 'drops_earlier_turns', 'drop_descendants', 'targets_hit',
-                   'mean_gain', 'route_turn', 'last_turn', 'budget_left')
+ACCEPT_FEATURES = ('bias', 'drops', 'drops_this_turn', 'drops_earlier_turns', 'drop_descendants', 'repairable_drops', 'single_repairable_drop',
+                   'targets_hit', 'mean_gain', 'route_turn', 'last_turn', 'budget_left')
+RETRY_FEATURES = ('bias', 'undrawn_share', 'damaged', 'budget_left', 'last_turn', 'attempts')
+SCHEMA = dict(route=ROUTE_FEATURES, accept=ACCEPT_FEATURES, retry=RETRY_FEATURES)
 
 
 def default_weights():
@@ -19,8 +21,10 @@ def default_weights():
         route['class=' + cls] = 4.0
     route['global_failures'] = -12.0
     accept = {name: 0.0 for name in ACCEPT_FEATURES}
-    accept.update(bias=-1.0, net_consistent=6.0, drops=-1.5, drop_descendants=-1.0)
-    return {'route': [route[n] for n in ROUTE_FEATURES], 'accept': [accept[n] for n in ACCEPT_FEATURES]}
+    accept.update(bias=-2.0, drops=-1.5, drop_descendants=-1.0, single_repairable_drop=2.0)
+    retry = {name: 0.0 for name in RETRY_FEATURES}
+    retry.update(bias=1.0)
+    return {'route': [route[n] for n in ROUTE_FEATURES], 'accept': [accept[n] for n in ACCEPT_FEATURES], 'retry': [retry[n] for n in RETRY_FEATURES]}
 
 
 def sigmoid(z):
@@ -30,15 +34,22 @@ def sigmoid(z):
 class StrategyPolicy:
     def __init__(self, weights=None, sample=True, seed=0):
         weights = weights or default_weights()
-        self.weights = {kind: [float(x) for x in weights[kind]] for kind in ('route', 'accept')}
+        if set(weights) != set(SCHEMA) or any(len(weights[kind]) != len(names) for kind, names in SCHEMA.items()):
+            raise ValueError('Strategy weights do not match the feature schema')
+        self.weights = {kind: [float(x) for x in weights[kind]] for kind in SCHEMA}
+        if not all(math.isfinite(x) for w in self.weights.values() for x in w):
+            raise ValueError('Strategy weights must be finite')
         self.sample, self.rng, self.log = sample, random.Random(seed), []
 
     @classmethod
     def load(cls, path, sample=False, seed=0):
-        return cls(json.loads(Path(path).read_text())['weights'], sample=sample, seed=seed)
+        data = json.loads(Path(path).read_text())
+        if {kind: list(data.get(kind + '_features', [])) for kind in SCHEMA} != {kind: list(names) for kind, names in SCHEMA.items()}:
+            raise ValueError(f'{path} was saved with another feature schema')
+        return cls(data['weights'], sample=sample, seed=seed)
 
     def save(self, path, **extra):
-        Path(path).write_text(json.dumps(dict(weights=self.weights, route_features=ROUTE_FEATURES, accept_features=ACCEPT_FEATURES, **extra), indent=1))
+        Path(path).write_text(json.dumps(dict(weights=self.weights, **{kind + '_features': names for kind, names in SCHEMA.items()}, **extra), indent=1))
 
     def probability(self, kind, features):
         return sigmoid(sum(w * f for w, f in zip(self.weights[kind], features)))

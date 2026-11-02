@@ -197,15 +197,34 @@ class ReDAGHarness:
 
     def accept_features(self, dag, targets, parent_state, new_scores, affected, route):
         threshold = lambda v: dag.nodes[v].threshold
-        drops = {v for v in parent_state.protected_set & affected if new_scores[v] < threshold(v)}
+        drops = {v for v in dag.nodes if parent_state.scores.get(v, 0.0) >= threshold(v) > new_scores.get(v, 0.0)}
         this_turn = sum(1 for v in drops if v in self.turn_nodes)
         descendants = (get_dependency_descendants(dag, drops) - drops) & parent_state.protected_set if drops else set()
-        net = consistent_count(dag, new_scores) - consistent_count(dag, parent_state.scores)
-        hits = sum(1 for t in targets if new_scores[t] >= threshold(t))
+        repairable = {v for v in drops if route_class(dag, v) in ('local', 'relation_local') and edit_footprint(dag, v) is not None}
+        hits = sum(1 for t in targets if new_scores[t] >= threshold(t) > parent_state.scores[t])
         gain = sum(dag.nodes[v].weight * (new_scores[v] - parent_state.scores[v]) for v in affected) / max(1, len(affected))
         clip = lambda x: max(-3.0, min(3.0, float(x))) / 3
-        return [1.0, clip(net), clip(len(drops)), clip(this_turn), clip(len(drops) - this_turn), clip(len(descendants)), clip(hits),
-                max(-1.0, min(1.0, 5 * gain)), float(route == 'turn'), float(self.turn_index >= self.turn_count - 1), self.budget_left()]
+        single = float(len(drops) == 1 and len(repairable) == 1 and not descendants and self.budget_left() > 0)
+        return [1.0, clip(len(drops)), clip(this_turn), clip(len(drops) - this_turn), clip(len(descendants)), clip(len(repairable)), single,
+                clip(hits), max(-1.0, min(1.0, 5 * gain)), float(route == 'turn'), float(self.turn_index >= self.turn_count - 1), self.budget_left()]
+
+    def strategy_acceptance(self, dag, targets, parent_state, new_scores, affected, route):
+        before, after = valid_nodes(dag, parent_state.scores), valid_nodes(dag, new_scores)
+        if len(after) != len(before):
+            return len(after) > len(before)
+        threshold = lambda v: dag.nodes[v].threshold
+        if not any(parent_state.scores.get(v, 0.0) >= threshold(v) > new_scores.get(v, 0.0) for v in dag.nodes):
+            return any(new_scores[t] - parent_state.scores[t] >= self.config.min_target_gain for t in targets)
+        if not any(new_scores[t] >= threshold(t) > parent_state.scores[t] for t in targets):
+            return False
+        return self.strategy.decide('accept', self.accept_features(dag, targets, parent_state, new_scores, affected, route))
+
+    def retry_features(self, dag, previous, attempts):
+        seen, targets = previous['raw_scores'], previous.get('targets') or [previous['target_node_id']]
+        undrawn = sum(1 for n in targets if n in dag.nodes and seen.get(n, 0.0) < dag.nodes[n].threshold) / max(1, len(targets))
+        damaged = sum(1 for v in previous['parent_state'].protected_set if v in dag.nodes and seen.get(v, 1.0) < dag.nodes[v].threshold)
+        clip = lambda x: max(-3.0, min(3.0, float(x))) / 3
+        return [1.0, undrawn, clip(damaged), self.budget_left(), float(self.turn_index >= self.turn_count - 1), clip(attempts)]
 
     def routes_globally(self, dag, node_id):
         if self.global_retries and self.global_failures.get((self.turn_index, node_id), 0) >= self.global_retries:
@@ -233,7 +252,13 @@ class ReDAGHarness:
             if record.get('route') != 'turn' or record['accepted']:
                 break
             rejected += 1
-        return records[-1] if 0 < rejected <= self.turn_retries else None
+        if not 0 < rejected <= self.turn_retries:
+            return None
+        if self.strategy is not None and self.mode == 'redag_full':
+            dag = records[-1]['dag']
+            if not self.strategy.decide('retry', self.retry_features(dag, records[-1], rejected)):
+                return None
+        return records[-1]
 
     def turn_candidates(self, state, dag, editor, targets, seed, previous=None):
         if self.render_limit is not None and self.generation_counter >= self.render_limit:
@@ -400,12 +425,8 @@ class ReDAGHarness:
         target_gain = raw_scores[target_node_id] - parent_state.scores[target_node_id]
         if not joint and self.confirm_drops and self.mode == 'redag_full' and (target_gain >= self.config.min_target_gain or raw_scores[target_node_id] >= dag.nodes[target_node_id].threshold):
             raw_scores, refuted = self.confirm_protected_drops(parent_state, graph, target_node_id, action, candidate, raw_scores, affected)
-        if joint and self.strategy is not None and self.mode == 'redag_full':
-            gate = lambda kind: joint_acceptance(graph, targets, parent_state.scores, raw_scores, parent_state.protected_set, affected,
-                                                 self.config.min_target_gain, kind)
-            accepted = gate('joint')
-            if not accepted and gate('mean'):
-                accepted = self.strategy.decide('accept', self.accept_features(graph, targets, parent_state, raw_scores, affected, route))
+        if self.strategy is not None and self.mode == 'redag_full':
+            accepted = self.strategy_acceptance(graph, targets, parent_state, raw_scores, affected, route)
         elif joint:
             accepted = joint_acceptance(graph, targets, parent_state.scores, raw_scores, parent_state.protected_set, affected,
                                         self.config.min_target_gain, self.turn_gate if route == 'turn' else self.global_gate)
