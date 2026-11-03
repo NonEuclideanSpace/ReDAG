@@ -43,6 +43,23 @@ def parse_controller_action(text, node, failure_mode="attribute_error"):
 
 
 
+def clean_controller_instruction(text, tokenizer):
+    original = text.strip()
+    text = original
+    lower = text.lower()
+    if "preserve" not in lower and "unchanged" not in lower and "intact" not in lower:
+        text = text.rstrip(".") + ". Keep all other objects, layout, colors, lighting and background unchanged."
+    encoded = tokenizer.encode(text, add_special_tokens=False)
+    if len(encoded) > 120:
+        limit = 120
+        text = tokenizer.decode(encoded[:limit], skip_special_tokens=True).strip()
+        while len(tokenizer.encode(text, add_special_tokens=False)) > 120 and limit > 1:
+            limit -= 1
+            text = tokenizer.decode(encoded[:limit], skip_special_tokens=True).strip()
+    count = len(tokenizer.encode(text, add_special_tokens=False))
+    return text, count, text != original
+
+
 def bounded_instruction(text, tokenizer):
     original = text.strip()
     text = original
@@ -68,6 +85,7 @@ class Controller(Planner):
 
     def __init__(self, model, processor, max_new_tokens=384):
         super().__init__(model, processor, max_new_tokens)
+        self.clean_instruction = False
 
     def messages(self, state, dag, target_node_id, detected_count=1):
         node = dag.nodes[target_node_id]
@@ -121,7 +139,8 @@ class Controller(Planner):
         text = self.processor.decode(action_tokens[0], skip_special_tokens=True)
         failure = classify_failure_mode(dag, target_node_id, state.scores, detected_count)
         action = parse_controller_action(text, dag.nodes[target_node_id], failure)
-        action.instruction, instruction_tokens, repaired = bounded_instruction(action.instruction, self.processor.tokenizer)
+        formatter = clean_controller_instruction if getattr(self, "clean_instruction", False) else bounded_instruction
+        action.instruction, instruction_tokens, repaired = formatter(action.instruction, self.processor.tokenizer)
         full = append_tokens(inputs, action_tokens)
         action_mask = torch.zeros((1, generated.shape[1] - 1), device=device)
         action_mask[:, length - 1:] = 1.0

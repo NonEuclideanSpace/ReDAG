@@ -260,6 +260,15 @@ def main():
             variant.append('turn_protect')
         if getattr(args, 'strategy_policy', None):
             variant.append('strategy_' + Path(args.strategy_policy).stem)
+        v5_flags = (
+            'clean_instruction', 'single_stage_verify', 'focused_turn', 'smart_turn_pass',
+            'cascade_priority', 'repair_gate', 'monotonic_turn',
+        )
+        for vflag in v5_flags:
+            if getattr(args, vflag, False):
+                variant.append(vflag)
+        if int(getattr(args, 'candidate_k', 1) or 1) > 1:
+            variant.append(f'candidate_k_{args.candidate_k}')
         if variant:
             fingerprint['variant'] = variant
         if kinds or tiers:
@@ -307,6 +316,8 @@ def main():
                                     runtime[0].cost_budget, runtime[0].generation_cost, runtime[0].budget_per_turn = args.cost_budget or None, args.generation_cost, args.budget_per_turn
                                 harness, controller, editor = runtime
                                 harness.mode = mode
+                                if hasattr(controller, 'clean_instruction'):
+                                    controller.clean_instruction = bool(getattr(args, 'clean_instruction', False)) and mode == 'redag_full'
                                 state, dag, trace = run_record(record, harness, controller, editor, args.max_steps, args.seed + seed, planner=planner)
                                 k = record.get('k', len(dag.nodes)) if record.get('revisions') else len(dag.nodes)
                                 if not args.allow_small_dataset and k not in (10, 20, 30):

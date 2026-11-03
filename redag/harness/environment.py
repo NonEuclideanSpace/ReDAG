@@ -73,13 +73,144 @@ def route_class(dag, node_id):
     return 'local'
 
 
+CLAUSE_STOPWORDS = {
+    'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'there', 'here',
+    'in', 'on', 'at', 'to', 'of', 'for', 'with', 'from', 'by', 'into', 'onto', 'upon',
+    'if', 'present', 'visible', 'shown', 'appear', 'appears', 'appearing', 'exists', 'exist',
+    'image', 'scene', 'picture', 'photo', 'frame', 'view', 'does', 'do', 'did', 'has', 'have',
+    'it', 'its', 'they', 'them', 'their', 'this', 'that', 'these', 'those', 'any', 'no', 'not',
+    'text', 'positioned', 'located', 'placed', 'situated', 'contains', 'contain', 'displays', 'display',
+}
+GENERIC_PHRASES = {
+    'text', 'image', 'scene', 'background', 'picture', 'photo', 'page', 'label', 'poster', 'can', 'sign', 'card', 'panel',
+}
+CHECKLIST_PREFIX_RE = re.compile(
+    r'^(?:create an image where|also make sure that|edit the image so(?: that)?)\s*:\s*', re.I
+)
+
+
+def end_sentence(text):
+    clean = ' '.join(str(text or '').split()).rstrip(';')
+    if not clean:
+        return ''
+    return clean if clean[-1] in '.!?' else clean + '.'
+
+
+def split_clauses(text):
+    text = ' '.join(str(text or '').split())
+    out, buf, in_sq, in_dq = [], [], False, False
+    for idx, ch in enumerate(text):
+        if ch == "'" and not in_dq:
+            prev_alnum = idx > 0 and text[idx - 1].isalnum()
+            next_alnum = idx + 1 < len(text) and text[idx + 1].isalnum()
+            if not (prev_alnum and next_alnum):
+                in_sq = not in_sq
+        elif ch == '"' and not in_sq:
+            in_dq = not in_dq
+        buf.append(ch)
+        if ch in '.!?;' and not in_sq and not in_dq:
+            nxt = text[idx + 1] if idx + 1 < len(text) else ' '
+            if nxt.isspace():
+                seg = ''.join(buf).strip()
+                if seg:
+                    out.append(seg)
+                buf = []
+    tail = ''.join(buf).strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def is_checklist_prompt(request):
+    text = ' '.join(str(request or '').split())
+    if not text:
+        return False
+    if CHECKLIST_PREFIX_RE.match(text):
+        return True
+    return len(split_clauses(text)) >= 3
+
+
+def strip_checklist_prefix(request):
+    return CHECKLIST_PREFIX_RE.sub('', ' '.join(str(request or '').split())).strip()
+
+
+def match_node_clauses(cleaned_request, dag, node_id):
+    clauses = split_clauses(cleaned_request)
+    if not clauses:
+        return []
+    node = dag.nodes[node_id]
+    quotes = [
+        (a or b).strip()
+        for a, b in re.findall(r"'([^']{2,})'|\"([^\"]{2,})\"", node.question)
+        if (a or b).strip() and '...' not in (a or b)
+    ]
+    if quotes:
+        hits = [c for c in clauses if all(qt.lower() in c.lower() for qt in quotes)]
+        if not hits:
+            hits = [c for c in clauses if any(qt.lower() in c.lower() for qt in quotes)]
+        if hits:
+            return hits[:2]
+    phrase = node.entity_phrase.strip().lower()
+    q_words = [w for w in re.findall(r'[a-z0-9]+', node.question.lower()) if len(w) >= 3 and w not in CLAUSE_STOPWORDS]
+    distinct = [w for w in q_words if not phrase or w not in phrase.split()]
+    scored = []
+    for clause in clauses:
+        cl = clause.lower()
+        c_words = set(re.findall(r'[a-z0-9]+', cl))
+        d_hits = sum(
+            1 for w in distinct if w in c_words or (w.endswith('s') and w[:-1] in c_words) or (w + 's' in c_words)
+        )
+        p_hit = bool(phrase and phrase not in GENERIC_PHRASES and phrase in cl)
+        if d_hits > 0 and (p_hit or not phrase or phrase in GENERIC_PHRASES or d_hits >= 2):
+            scored.append((d_hits * 2 + int(p_hit), clause))
+        elif not distinct and p_hit:
+            scored.append((1, clause))
+    if scored:
+        best_score = max(s for s, _ in scored)
+        return [c for s, c in scored if s == best_score][:2]
+    return []
+
+
+def prohibition_directive(node, matched_clause=''):
+    ql = ' '.join(node.question.strip().split()).rstrip('?').strip()
+    patterns = (
+        r'^(?:is there no|are there no|is the image free of)\s+(.+?)(?:\s+in the (?:image|scene|room|picture|photo))?$',
+        r'^(?:if .+?, )?(?:is|are)\s+.+?\s+free of\s+(.+?)$',
+        r'^(?:if .+?, )?does\s+.+?\s+(?:contain|incorporate|show|have)\s+no\s+(.+?)$',
+        r'^(?:if .+?, )?does\s+.+?\s+not\s+have\s+(?:any\s+|a\s+|an\s+)?(.+?)$',
+        r'^(?:if .+?, )?are there not any\s+(.+?)$',
+    )
+    for pat in patterns:
+        match = re.match(pat, ql, re.I)
+        if match:
+            return f"Remove any {match.group(1).strip().rstrip('.')} from the image"
+    other_match = re.match(r'^are there (?:any )?(.+?\bother than\b.+)$', ql, re.I)
+    if other_match:
+        return f'Remove any {other_match.group(1).strip()}'
+    if matched_clause:
+        mc = matched_clause.strip().rstrip('.!?;')
+        for no_pat in (
+            r'^no\s+(.+?)\s+(?:is|are)\s+(?:present|visible|in the image)$',
+            r'^no\s+(.+?)\s+appear(?:s)?(?:\s+in the image)?$',
+        ):
+            no_match = re.match(no_pat, mc, re.I)
+            if no_match:
+                return f'Remove any {no_match.group(1).strip()} from the image'
+        return mc
+    if_not = re.match(r'^if .+?, (?:is|are)\s+(.+?)\s+not\s+(.+?)$', ql, re.I)
+    if if_not:
+        return f'Make sure {if_not.group(1).strip()} is not {if_not.group(2).strip()}'
+    return 'Make sure that ' + requirement_statement(node)
+
+
 def request_snippet(request, dag, node_id, max_words=40):
     request = ' '.join(str(request or '').split())
     if not request:
         return ''
-    phrases = {dag.nodes[node_id].entity_phrase.strip().lower()} | {dag.nodes[p].entity_phrase.strip().lower() for p in condition_parents(dag, node_id)}
-    phrases = {p for p in phrases if p}
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?;])\s+', request) if s.strip()]
+    parents = condition_parents(dag, node_id)
+    phrases = {dag.nodes[node_id].entity_phrase.strip().lower()} | {dag.nodes[p].entity_phrase.strip().lower() for p in parents}
+    phrases = {p for p in phrases if p and p not in GENERIC_PHRASES}
+    sentences = split_clauses(request)
     chosen = [s for s in sentences if any(p in s.lower() for p in phrases)]
     if chosen:
         return ' '.join(chosen)
@@ -89,18 +220,19 @@ def request_snippet(request, dag, node_id, max_words=40):
 def with_user_request(instruction, snippet):
     if not snippet:
         return instruction
-    return instruction.rstrip() + ' The user asked: "' + snippet.strip().rstrip('.') + '."'
+    clean_snip = snippet.strip().rstrip('.!?;')
+    return instruction.rstrip() + ' The user asked: "' + clean_snip + '."'
 
 
 def global_instruction(request, node):
-    request = ' '.join(str(request or '').split()).rstrip('.')
+    lead = end_sentence(request)
     statement = requirement_statement(node)
-    return (request + '. ' if request else '') + 'Make sure that ' + statement + '.'
+    return (lead + ' ' if lead else '') + 'Make sure that ' + statement + '.'
 
 
 def turn_instruction(request):
-    request = ' '.join(str(request or '').split()).rstrip('.')
-    return request + '. Keep everything else in the image unchanged.'
+    lead = end_sentence(request)
+    return (lead + ' ' if lead else '') + 'Keep everything else in the image unchanged.'
 
 
 def retry_instruction(request, dag, undrawn, dropped, limit=3):
@@ -110,6 +242,56 @@ def retry_instruction(request, dag, undrawn, dropped, limit=3):
     if dropped:
         text += ' Also keep these true: ' + '; '.join(requirement_statement(dag.nodes[n]) for n in dropped[:limit]) + '.'
     return text
+
+
+def focused_global_instruction(request, dag, node_id):
+    node = dag.nodes[node_id]
+    stmt = requirement_statement(node)
+    keep = ' Keep everything else in the image unchanged.'
+    if not is_checklist_prompt(request):
+        lead = end_sentence(request)
+        if node.node_type == 'prohibition' and not lead:
+            lead = end_sentence(prohibition_directive(node))
+        return (lead + ' ' if lead else '') + 'Make sure that ' + stmt + '.' + keep
+    cleaned = strip_checklist_prefix(request)
+    matched = match_node_clauses(cleaned, dag, node_id)
+    if node.node_type == 'prohibition':
+        directive = end_sentence(prohibition_directive(node, matched[0] if matched else ''))
+        return directive + keep
+    lead = ' '.join(end_sentence(c) for c in matched).strip()
+    return (lead + ' ' if lead else '') + 'Make sure that ' + stmt + '.' + keep
+
+
+def focused_turn_instruction(request, dag, targets):
+    if not is_checklist_prompt(request):
+        return turn_instruction(request)
+    cleaned = strip_checklist_prefix(request)
+    sentences, seen = [], set()
+    for nid in targets:
+        node = dag.nodes[nid]
+        matched = match_node_clauses(cleaned, dag, nid)
+        if node.node_type == 'prohibition':
+            raw_parts = [prohibition_directive(node, matched[0] if matched else '')]
+        elif matched:
+            raw_parts = matched
+        else:
+            raw_parts = ['Make sure that ' + requirement_statement(node)]
+        for part in raw_parts:
+            for seg in split_clauses(part):
+                sent = end_sentence(seg)
+                key = sent.rstrip('.!?').lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    sentences.append(sent)
+    body = ' '.join(sentences).strip()
+    return (body + ' ' if body else '') + 'Keep everything else in the image unchanged.'
+
+
+def unlocked_satisfied_descendants(dag, scores, node_id):
+    if scores.get(node_id, 0.0) >= dag.nodes[node_id].threshold:
+        return 0
+    trial = dict(scores, **{node_id: max(dag.nodes[node_id].threshold, 1.0)})
+    return max(0, len(valid_nodes(dag, trial)) - len(valid_nodes(dag, scores)) - 1)
 
 
 def logical_parents(dag):
@@ -186,6 +368,9 @@ class ReDAGHarness:
         self.global_retries, self.global_failures = 0, {}
         self.strategy, self.local_failures, self.turn_count, self.on_turn_start = None, {}, 1, None
         self.turn_retries, self.turn_priority, self.local_gate, self.turn_localize, self.turn_protect = 0, False, 'legacy', False, False
+        self.node_turn_request, self.repair_queue, self.repaired_in_turn, self.steps_remaining = {}, [], set(), 0
+        self.single_stage_verify, self.focused_turn, self.smart_turn_pass = False, False, False
+        self.cascade_priority, self.repair_gate, self.monotonic_turn, self.candidate_k = False, False, False, 1
 
     def budget_left(self):
         if self.render_limit is None or not self.generation_budget:
@@ -240,12 +425,22 @@ class ReDAGHarness:
             return False
         return self.scope_routing and self.mode == 'redag_full' and route_class(dag, node_id) in self.global_types
 
+    def node_request(self, node_id):
+        if node_id in self.node_turn_request:
+            return self.node_turn_request[node_id]
+        return '' if self.node_turn_request else self.turn_request
+
     def turn_targets(self, dag, state):
         if not self.turn_pass or self.mode != 'redag_full' or not self.turn_request.strip():
             return []
         if self.turn_index == 0 and self.draft_first_turn:
             return []
-        return [nid for nid in dag.nodes if nid in self.turn_nodes and state.scores.get(nid, 0.0) < dag.nodes[nid].threshold]
+        targets = [nid for nid in dag.nodes if nid in self.turn_nodes and state.scores.get(nid, 0.0) < dag.nodes[nid].threshold]
+        if self.smart_turn_pass and self.draft_first_turn and 0 < len(targets) <= 2:
+            if all(not self.routes_globally(dag, t) and (fp := edit_footprint(dag, t)) is not None
+                   and box_area(fp) < WHOLE_CANVAS_SHARE for t in targets):
+                return []
+        return targets
 
     def turn_footprint(self, dag, node_id, scores, located, seen=()):
         node = dag.nodes[node_id]
@@ -278,6 +473,15 @@ class ReDAGHarness:
         boxes = [self.turn_footprint(dag, nid, scores or {}, located) for nid in targets]
         if any(b is None for b in boxes):
             return CANVAS
+        if self.focused_turn and self.turn_localize and not is_checklist_prompt(self.turn_request):
+            req_low = self.turn_request.lower()
+            target_set = set(targets)
+            for nid, node in dag.nodes.items():
+                phrase = node.entity_phrase.strip().lower()
+                pat = rf"(?<![a-z0-9]){re.escape(phrase)}(?:e?s|'s)?(?![a-z0-9])" if phrase else ''
+                if (nid not in target_set and phrase and phrase not in GENERIC_PHRASES and re.search(pat, req_low)
+                        and node.bbox is not None and (scores or {}).get(nid, 0.0) >= node.threshold):
+                    boxes.append(node.bbox)
         boxes = [b for b in boxes if b]
         if not boxes or any(box_area(b) >= WHOLE_CANVAS_SHARE for b in boxes):
             return CANVAS
@@ -298,6 +502,76 @@ class ReDAGHarness:
                 return None
         return records[-1]
 
+    def evaluate_best_of_k(self, state, graph, target_node_id, action, editor, seed, mask, route, targets=None, k_count=1):
+        targets = list(targets or [target_node_id])
+        eff = self.effective_graph(graph)
+        whole = box_area(action.box) >= WHOLE_CANVAS_SHARE
+        joint = route in ('global', 'turn')
+        if joint and whole:
+            est_affected = len(eff.nodes)
+        elif route == 'turn':
+            est_affected = len(set().union(*(compute_affected_subgraph(eff, action, t, state.protected_set) for t in targets)))
+        elif self.mode == 'redag_full':
+            est_affected = len(compute_affected_subgraph(eff, action, target_node_id, state.protected_set))
+        else:
+            est_affected = len(eff.nodes)
+        base_gf, base_lf = dict(self.global_failures), dict(self.local_failures)
+        evaluated = []
+        for k_idx in range(k_count):
+            if k_idx > 0:
+                reserve = 1 if any(c['accepted'] and c.get('repair_drop') for c, _, _ in evaluated) else 0
+                if self.render_limit is not None and self.generation_counter + reserve >= self.render_limit:
+                    break
+                if self.verifier.call_limit is not None and self.verifier.call_counter >= self.verifier.call_limit:
+                    break
+                if self.cost_budget is not None and self.cost_origin is not None:
+                    if self.spent_cost() + reserve * self.generation_cost >= self.cost_budget:
+                        break
+            render_seed = seed if k_idx == 0 else seed + k_idx * 10007
+            self.generation_counter += 1
+            crop, editable = self.render(editor, state, action, render_seed, mask)
+            if k_idx > 0 and est_affected > len(targets) + 1:
+                feather = 0 if joint and whole else self.feather_px
+                pasted = paste_window_strictly_local(state.image, crop, action.box, feather, editable)
+                self.verifier.two_stage = (
+                    (self.mode not in BASELINE_MODES) and not (self.single_stage_verify and self.mode == 'redag_full')
+                )
+                rec_len = len(self.verifier.records)
+                try:
+                    q1 = {t: self.verifier.verify_single_node_two_stage(pasted, eff.nodes[t], eff) for t in targets}
+                except RuntimeError as error:
+                    del self.verifier.records[rec_len:]
+                    if str(error) != 'Verifier call budget exhausted':
+                        raise
+                    break
+                del self.verifier.records[rec_len:]
+                min_gain = self.config.min_target_gain
+                if not any(q1[t] >= eff.nodes[t].threshold or q1[t] - state.scores.get(t, 0.0) >= min_gain for t in targets):
+                    continue
+            self.global_failures, self.local_failures = dict(base_gf), dict(base_lf)
+            try:
+                self.evaluate_candidate_action(state, graph, target_node_id, action, crop, editable, route=route, targets=targets)
+            except RuntimeError as error:
+                self.global_failures, self.local_failures = base_gf, base_lf
+                if str(error) != 'Verifier call budget exhausted':
+                    raise
+                if k_idx == 0:
+                    return None
+                break
+            cand = dict(self.last_candidate)
+            evaluated.append((cand, dict(self.global_failures), dict(self.local_failures)))
+            if cand['accepted'] and not cand.get('repair_drop'):
+                break
+        best = max(evaluated, key=lambda item: (
+            int(item[0]['accepted'] and not item[0].get('repair_drop')),
+            int(item[0]['accepted']),
+            consistent_count(eff, item[0]['raw_scores']),
+            sum(item[0]['raw_scores'][t] for t in targets),
+            item[0]['reward'],
+        ))
+        self.last_candidate, self.global_failures, self.local_failures = best[0], best[1], best[2]
+        return best[0]
+
     def turn_candidates(self, state, dag, editor, targets, seed, previous=None):
         if self.render_limit is not None and self.generation_counter >= self.render_limit:
             return []
@@ -306,22 +580,27 @@ class ReDAGHarness:
         if self.cost_budget is not None and self.cost_origin is not None and self.spent_cost() >= self.cost_budget:
             return []
         graph = deepcopy(dag)
-        instruction = turn_instruction(self.turn_request)
+        instruction = (
+            focused_turn_instruction(self.turn_request, graph, targets)
+            if self.focused_turn else turn_instruction(self.turn_request)
+        )
         if previous is not None:
             seen = previous['raw_scores']
             undrawn = [n for n in targets if seen.get(n, 0.0) < graph.nodes[n].threshold]
-            dropped = sorted(n for n in previous['parent_state'].protected_set if n in graph.nodes and seen.get(n, 1.0) < graph.nodes[n].threshold)
-            instruction = retry_instruction(self.turn_request, graph, undrawn, dropped)
+            prev_prot = previous['parent_state'].protected_set
+            dropped = [n for n in prev_prot if n in graph.nodes and seen.get(n, 1.0) < graph.nodes[n].threshold]
+            use_strip = self.focused_turn and is_checklist_prompt(self.turn_request)
+            base_req = strip_checklist_prefix(self.turn_request) if use_strip else self.turn_request
+            instruction = retry_instruction(base_req, graph, undrawn, sorted(dropped))
         action = ControllerAction('modify_attr', self.turn_box(graph, targets, state.image, state.scores), instruction)
-        self.generation_counter += 1
-        crop, editable = self.render(editor, state, action, seed, self.turn_mask(state, graph, targets, action))
-        try:
-            self.evaluate_candidate_action(state, graph, targets[0], action, crop, editable, route='turn', targets=targets)
-        except RuntimeError as error:
-            if str(error) != 'Verifier call budget exhausted':
-                raise
+        mask = self.turn_mask(state, graph, targets, action)
+        k_count = self.candidate_k if (self.candidate_k > 1 and self.mode == 'redag_full') else 1
+        chosen = self.evaluate_best_of_k(
+            state, graph, targets[0], action, editor, seed, mask, route='turn', targets=targets, k_count=k_count
+        )
+        if chosen is None:
             return []
-        return [dict(self.last_candidate, sample={'action': action, 'route': 'turn', 'targets': list(targets)})]
+        return [dict(chosen, sample={'action': action, 'route': 'turn', 'targets': list(targets)})]
 
     def effective_graph(self, dag):
         if self.mode not in ('redag_full', 'flat_full', 'tree_rollback_only', 'spatial_local', 'spatial_no_gates'):
@@ -434,7 +713,7 @@ class ReDAGHarness:
     def initialize(self, image, dag):
         if self.grounder is not None:
             dag = self.grounder.ground(image, dag)
-        self.verifier.two_stage = self.mode not in BASELINE_MODES
+        self.verifier.two_stage = (self.mode not in BASELINE_MODES) and not (self.single_stage_verify and self.mode == 'redag_full')
         self.unknown_nodes = set()
         scores = self.verify_current(image, dag, dict.fromkeys(dag.nodes, 0.0), set(dag.nodes))
         return CanvasState(image, scores, {n for n in dag.nodes if n not in self.unknown_nodes and scores[n] >= dag.nodes[n].threshold}), dag
@@ -442,7 +721,7 @@ class ReDAGHarness:
     def evaluate_candidate_action(self, parent_state, dag, target_node_id, action, edited_crop, editable=None, route='local', targets=None):
         calls, start = self.verifier.call_counter, len(self.verifier.records)
         graph = self.effective_graph(dag)
-        self.verifier.two_stage = self.mode not in BASELINE_MODES
+        self.verifier.two_stage = (self.mode not in BASELINE_MODES) and not (self.single_stage_verify and self.mode == 'redag_full')
         targets = list(targets or [target_node_id])
         whole = box_area(action.box) >= WHOLE_CANVAS_SHARE
         joint = route in ('global', 'turn')
@@ -473,6 +752,25 @@ class ReDAGHarness:
         else:
             accepted = check_local_acceptance(graph, target_node_id, parent_state.scores, raw_scores, parent_state.protected_set, affected,
                                              self.config.min_target_gain, self.config.max_protected_drop)
+        repair_drop = None
+        if not accepted and self.repair_gate and self.mode == 'redag_full' and self.steps_remaining > 0:
+            has_render = self.render_limit is None or self.generation_counter < self.render_limit
+            has_cost = (
+                self.cost_budget is None
+                or self.cost_origin is None
+                or self.spent_cost() + self.generation_cost <= self.cost_budget
+            )
+            if has_render and has_cost:
+                before_v, after_v = valid_nodes(graph, parent_state.scores), valid_nodes(graph, raw_scores)
+                hit = any(raw_scores[t] >= graph.nodes[t].threshold > parent_state.scores.get(t, 0.0) for t in targets)
+                drops = [v for v in graph.nodes if parent_state.scores.get(v, 0.0) >= graph.nodes[v].threshold > raw_scores.get(v, 0.0)]
+                if hit and len(after_v) >= len(before_v) and len(drops) == 1:
+                    d = drops[0]
+                    fp = edit_footprint(graph, d)
+                    no_cascade = unlocked_satisfied_descendants(graph, raw_scores, d) == 0
+                    if (d not in targets and d not in self.repaired_in_turn and not self.routes_globally(graph, d)
+                            and fp is not None and box_area(fp) < WHOLE_CANVAS_SHARE and no_cascade):
+                        accepted, repair_drop = True, d
         if not accepted and route in ('global', 'local'):
             failures = self.global_failures if route == 'global' else self.local_failures
             key = (self.turn_index, target_node_id)
@@ -489,7 +787,8 @@ class ReDAGHarness:
             candidate_state=CanvasState(candidate, raw_scores, {n for n in raw_scores if raw_scores[n] >= dag.nodes[n].threshold}),
             delivered_state=state, raw_scores=raw_scores, affected=affected, target_node_id=target_node_id, action=action,
             accepted=accepted, reward=reward, coverage_uncertain_nodes=sorted(uncertain), refuted_drops=refuted,
-            stage_scores=self.verifier.records[start:], verifier_calls=self.verifier.call_counter - calls, route=route, targets=targets)
+            stage_scores=self.verifier.records[start:], verifier_calls=self.verifier.call_counter - calls, route=route, targets=targets,
+            repair_drop=repair_drop)
         return state, reward, accepted, affected
 
     def editable_mask(self, state, dag, target_node_id, action):
@@ -579,12 +878,26 @@ class ReDAGHarness:
                 route = 'global' if self.routes_globally(graph, target_node_id) else 'local'
                 if self.strategy is not None and self.mode == 'redag_full':
                     route = 'global' if self.strategy.decide('route', self.route_features(state, graph, target_node_id)) else 'local'
+                req_text = self.node_request(target_node_id)
                 if route == 'global':
-                    sample = {'action': ControllerAction('modify_attr', CANVAS, global_instruction(self.turn_request, graph.nodes[target_node_id]))}
+                    use_focus = self.focused_turn and self.mode == 'redag_full'
+                    g_inst = (
+                        focused_global_instruction(req_text, graph, target_node_id)
+                        if use_focus else global_instruction(req_text, graph.nodes[target_node_id])
+                    )
+                    sample = {'action': ControllerAction('modify_attr', CANVAS, g_inst)}
                 else:
-                    sample = controller.sample(state, graph, target_node_id, seed=seed + index, temperature=0.8,
-                        detected_count=self.grounder.counts.get(dag.nodes[target_node_id].entity_phrase, 1) if self.grounder else 1)
-                self.generation_counter += 1
+                    det_cnt = self.grounder.counts.get(dag.nodes[target_node_id].entity_phrase, 1) if self.grounder else 1
+                    saved_clean = getattr(controller, 'clean_instruction', None)
+                    if saved_clean is not None and self.mode != 'redag_full':
+                        controller.clean_instruction = False
+                    try:
+                        sample = controller.sample(
+                            state, graph, target_node_id, seed=seed + index, temperature=0.8, detected_count=det_cnt
+                        )
+                    finally:
+                        if saved_clean is not None:
+                            controller.clean_instruction = saved_clean
                 if self.mode in BASELINE_MODES:
                     sample['action'] = ControllerAction(sample['action'].op, CANVAS, sample['action'].instruction)
                 if route == 'local' and self.closure_instructions and self.mode == 'redag_full':
@@ -600,18 +913,21 @@ class ReDAGHarness:
                     if phrases:
                         sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, sample['action'].instruction.rstrip() + ' Keep the ' + ' and the '.join(phrases) + ' unchanged.')
                 if route == 'local' and self.user_text and self.mode == 'redag_full':
-                    snippet = request_snippet(self.turn_request, graph, target_node_id)
-                    sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, with_user_request(sample['action'].instruction, snippet))
+                    if self.focused_turn and is_checklist_prompt(req_text):
+                        snippet = ' '.join(match_node_clauses(strip_checklist_prefix(req_text), graph, target_node_id))
+                    else:
+                        snippet = request_snippet(req_text, graph, target_node_id, max_words=40)
+                    new_inst = with_user_request(sample['action'].instruction, snippet)
+                    sample['action'] = ControllerAction(sample['action'].op, sample['action'].box, new_inst)
                 sample['route'] = route
                 mask = None if route == 'global' else self.editable_mask(state, graph, target_node_id, sample['action'])
-                crop, editable = self.render(editor, state, sample['action'], seed, mask)
-                try:
-                    self.evaluate_candidate_action(state, graph, target_node_id, sample['action'], crop, editable, route=route)
-                except RuntimeError as error:
-                    if str(error) != 'Verifier call budget exhausted':
-                        raise
+                k_count = self.candidate_k if (self.candidate_k > 1 and self.mode == 'redag_full' and group_size == 1) else 1
+                chosen = self.evaluate_best_of_k(
+                    state, graph, target_node_id, sample['action'], editor, seed, mask, route=route, k_count=k_count
+                )
+                if chosen is None:
                     break
-                candidates.append(dict(self.last_candidate, sample=sample))
+                candidates.append(dict(chosen, sample=sample))
         finally:
             self.restore_grounding(grounding)
         return candidates
@@ -628,11 +944,14 @@ class ReDAGHarness:
         if old_limits[1] is None and self.generation_budget is not None:
             self.render_limit = renders + self.generation_budget
         reason, failures = 'step_budget', {}
+        self.repair_queue, self.repaired_in_turn = [], set()
         own_origin = self.cost_origin is None
         if own_origin:
             self.cost_origin = (calls, renders)
         try:
             for step in range(max_steps):
+                self.steps_remaining = max_steps - 1 - step
+                self.repair_queue = [n for n in self.repair_queue if n in dag.nodes and state.scores.get(n, 0.0) < dag.nodes[n].threshold]
                 if self.unknown_nodes:
                     reason = 'execution_budget'
                     break
@@ -644,7 +963,20 @@ class ReDAGHarness:
                 if not frontier and not turn_targets:
                     reason = 'satisfied' if all(state.scores[n] >= dag.nodes[n].threshold for n in dag.nodes) else 'blocked_frontier'
                     break
-                frontier.sort(key=lambda nid: (failures.get(nid, 0) >= self.retry_limit, self.turn_priority and nid not in self.turn_nodes))
+                eff_dag = self.effective_graph(dag)
+                repair_rank = {nid: idx for idx, nid in enumerate(self.repair_queue)}
+                if self.mode == 'redag_full' and (self.cascade_priority or self.repair_queue):
+                    frontier.sort(key=lambda nid: (
+                        failures.get(nid, 0) >= self.retry_limit,
+                        repair_rank.get(nid, 10000),
+                        -(unlocked_satisfied_descendants(eff_dag, state.scores, nid) if self.cascade_priority else 0),
+                        self.turn_priority and nid not in self.turn_nodes,
+                        -dag.nodes[nid].weight * (1.0 - state.scores.get(nid, 0.0)),
+                    ))
+                else:
+                    frontier.sort(
+                        key=lambda nid: (failures.get(nid, 0) >= self.retry_limit, self.turn_priority and nid not in self.turn_nodes)
+                    )
                 group_calls, group_renders = self.verifier.call_counter, self.generation_counter
                 if turn_targets:
                     candidates = self.turn_candidates(state, dag, editor, turn_targets, seed + step * group_size, previous=retry)
@@ -660,6 +992,11 @@ class ReDAGHarness:
                 state = chosen['delivered_state']
                 if chosen['accepted']:
                     failures.clear()
+                    if chosen.get('repair_drop'):
+                        drop_id = chosen['repair_drop']
+                        self.repaired_in_turn.add(drop_id)
+                        if drop_id not in self.repair_queue:
+                            self.repair_queue.append(drop_id)
                 elif not turn_targets:
                     failures[frontier[0]] = failures.get(frontier[0], 0) + 1
                 if chosen['accepted'] and self.grounder is not None:
@@ -679,6 +1016,16 @@ class ReDAGHarness:
                 best = max(nodes, key=lambda n: sum(n['dag'].nodes[v].weight * q for v, q in n['state'].scores.items()))
                 state, dag = best['state'], deepcopy(best['dag'])
                 self.restore_grounding(best['grounding'])
+            elif self.monotonic_turn and self.mode == 'redag_full':
+                best = max(enumerate(nodes), key=lambda item: (
+                    consistent_count(self.effective_graph(item[1]['dag']), item[1]['state'].scores),
+                    sum(item[1]['dag'].nodes[v].weight * q for v, q in item[1]['state'].scores.items()),
+                    item[0],
+                ))[1]
+                state, dag = best['state'], deepcopy(best['dag'])
+                self.restore_grounding(best['grounding'])
+                if records:
+                    records[-1]['returned_state'] = state
             if self.mode != 'flat_full':
                 for node in nodes:
                     if node['parent'] is not None:
@@ -694,6 +1041,7 @@ class ReDAGHarness:
     def run_conversation(self, image, prompts, planner, controller, editor, max_steps=10, seed=42, group_size=1):
         from redag.models.planner import preserve_previous_conditions
         dag, state, records = None, None, []
+        self.node_turn_request = {}
         self.turn_count = len(prompts)
         for turn, request in enumerate(prompts):
             request = {'user_prompt': request} if isinstance(request, str) else request
@@ -708,6 +1056,12 @@ class ReDAGHarness:
                 dag = planner.plan(request['user_prompt'], previous_dag=previous, **kwargs)
                 dag = preserve_previous_conditions(dag, previous, superseded if superseded is not None else getattr(planner, 'last_superseded_ids', []))
             self.turn_nodes = set(dag.nodes) - (set(previous.nodes) if previous is not None else set())
+            for nid in list(self.node_turn_request):
+                if nid not in dag.nodes:
+                    del self.node_turn_request[nid]
+            for nid in self.turn_nodes | (set(superseded or ()) & set(dag.nodes)):
+                is_src_inv = turn == 0 and not self.draft_first_turn and bool(re.match(r'^(?:i|u)\d+$', nid))
+                self.node_turn_request[nid] = '' if is_src_inv else self.turn_request
             if state is None:
                 state, dag = self.initialize(image, dag)
             else:
@@ -762,6 +1116,7 @@ def run_record(record, harness, controller, editor, max_steps=10, seed=42, group
         harness.verifier.call_limit = min(verification_limits, default=None)
         harness.render_limit = min(generation_limits, default=None)
     harness.turn_request, harness.turn_nodes, harness.turn_index = '', set(), 0
+    harness.node_turn_request = {}
     harness.global_failures, harness.local_failures, harness.turn_count = {}, {}, 1
     harness.draft_first_turn = record.get('kind') == 't2i'
     try:
@@ -778,6 +1133,7 @@ def run_record(record, harness, controller, editor, max_steps=10, seed=42, group
         harness.last_run.update(generation_calls=harness.generation_counter - renders, verifier_calls=harness.verifier.call_counter - calls)
         harness.verifier.call_limit, harness.render_limit = limits
         harness.cost_origin = None
+        harness.node_turn_request = {}
 
 
 def add_runtime_arguments(parser):
@@ -823,6 +1179,14 @@ def add_runtime_arguments(parser):
     parser.add_argument('--turn_localize', action='store_true')
     parser.add_argument('--turn_protect', action='store_true')
     parser.add_argument('--strategy_policy')
+    parser.add_argument('--clean_instruction', action='store_true')
+    parser.add_argument('--single_stage_verify', action='store_true')
+    parser.add_argument('--focused_turn', action='store_true')
+    parser.add_argument('--smart_turn_pass', action='store_true')
+    parser.add_argument('--cascade_priority', action='store_true')
+    parser.add_argument('--repair_gate', action='store_true')
+    parser.add_argument('--monotonic_turn', action='store_true')
+    parser.add_argument('--candidate_k', type=int, default=1)
     return parser
 
 
@@ -833,6 +1197,7 @@ def load_runtime(args, trainable_controller=False, trainable_editor=False):
     from redag.verify.verifier import TwoStageVerifier, load_vlm_scorer
     dtype = torch.float32 if args.device == 'cpu' else torch.bfloat16
     controller = Controller.from_pretrained(args.controller_model, args.device, dtype, args.controller_adapter, trainable_controller)
+    controller.clean_instruction = bool(getattr(args, 'clean_instruction', False))
     edit_device, verify_device = args.editor_device or args.device, args.verifier_device or args.device
     if getattr(args, 'editor_kind', 'flux') == 'pipeline':
         editor = PipelineEditor.from_pretrained(args.editor_model, edit_device, torch.bfloat16, getattr(args, 'editor_offload', False))
@@ -874,6 +1239,13 @@ def configure_routing(harness, args):
     harness.local_gate = getattr(args, 'local_gate', 'legacy') or 'legacy'
     harness.turn_localize = bool(getattr(args, 'turn_localize', False))
     harness.turn_protect = bool(getattr(args, 'turn_protect', False))
+    harness.single_stage_verify = bool(getattr(args, 'single_stage_verify', False))
+    harness.focused_turn = bool(getattr(args, 'focused_turn', False))
+    harness.smart_turn_pass = bool(getattr(args, 'smart_turn_pass', False))
+    harness.cascade_priority = bool(getattr(args, 'cascade_priority', False))
+    harness.repair_gate = bool(getattr(args, 'repair_gate', False))
+    harness.monotonic_turn = bool(getattr(args, 'monotonic_turn', False))
+    harness.candidate_k = max(1, int(getattr(args, 'candidate_k', 1) or 1))
     if getattr(args, 'strategy_policy', None):
         from redag.learn.strategy import StrategyPolicy
         harness.strategy = StrategyPolicy.load(args.strategy_policy, sample=False)
