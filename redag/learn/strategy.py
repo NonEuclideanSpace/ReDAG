@@ -24,9 +24,7 @@ def default_weights():
     accept = {name: 0.0 for name in ACCEPT_FEATURES}
     accept.update(bias=-2.0, drops=-1.5, drop_descendants=-1.0, single_repairable_drop=2.0)
     retry = {name: 0.0 for name in RETRY_FEATURES}
-    retry.update(bias=1.0)
     turn = {name: 0.0 for name in TURN_FEATURES}
-    turn.update(bias=1.5)
     return {'route': [route[n] for n in ROUTE_FEATURES], 'accept': [accept[n] for n in ACCEPT_FEATURES], 'retry': [retry[n] for n in RETRY_FEATURES],
             'turn': [turn[n] for n in TURN_FEATURES]}
 
