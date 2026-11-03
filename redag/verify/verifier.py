@@ -50,7 +50,10 @@ class TwoStageVerifier:
         record["stage2"] = q_2
         return q_2
 
-    def verify_subgraph_after_edit(self, image_new: torch.Tensor, dag: ConditionDAG, prev_scores: Dict[str, float], affected_nodes: Set[str]) -> Dict[str, float]:
+    def verify_subgraph_after_edit(
+        self, image_new: torch.Tensor, dag: ConditionDAG, prev_scores: Dict[str, float],
+        affected_nodes: Set[str], pre_verified: Dict[str, float] = None,
+    ) -> Dict[str, float]:
         new_scores: Dict[str, float] = dict(prev_scores)
         comp_parents = {nid: [] for nid in dag.nodes}
         for p, c in dag.comp_edges:
@@ -62,6 +65,8 @@ class TwoStageVerifier:
         for v in ordered_affected:
             if any((new_scores.get(p, 0.0) < self.gate_tau for p in comp_parents[v])):
                 new_scores[v] = 0.0
+            elif pre_verified is not None and v in pre_verified:
+                new_scores[v] = pre_verified[v]
             else:
                 new_scores[v] = self.verify_single_node_two_stage(image_new, dag.nodes[v], dag)
         return new_scores

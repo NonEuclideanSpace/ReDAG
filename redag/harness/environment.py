@@ -14,6 +14,24 @@ from redag.verify.verifier import expand_bbox_with_margin
 BASELINE_MODES = ('flat_full', 'tree_rollback_only')
 
 
+SRC_INVARIANT_RE = re.compile(r'^(?:i|u)\d+$')
+
+
+def is_source_invariant_id(node_id):
+    return bool(SRC_INVARIANT_RE.match(str(node_id)))
+
+
+def norm_entity_stem(phrase):
+    p = phrase.strip().lower()
+    if len(p) > 4 and p.endswith('ies'):
+        return p[:-3] + 'y'
+    if len(p) > 3 and p.endswith('es') and p[-3] in 'sxzho':
+        return p[:-2]
+    if len(p) > 2 and p.endswith('s') and not p.endswith('ss'):
+        return p[:-1]
+    return p
+
+
 def union_box(boxes):
     return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
 
@@ -302,6 +320,18 @@ def logical_parents(dag):
     return {v: {p for p in ps if p in dag.nodes and p != v} for v, ps in parents.items()}
 
 
+def graph_ancestors(dag, node_id):
+    parents = logical_parents(dag)
+    seen, stack = set(), list(parents.get(node_id, ()))
+    while stack:
+        cur = stack.pop()
+        if cur in seen or cur == node_id or cur not in dag.nodes:
+            continue
+        seen.add(cur)
+        stack.extend(p for p in parents.get(cur, ()) if p not in seen)
+    return seen
+
+
 def valid_nodes(dag, scores):
     parents, memo = logical_parents(dag), {}
 
@@ -369,6 +399,7 @@ class ReDAGHarness:
         self.strategy, self.local_failures, self.turn_count, self.on_turn_start = None, {}, 1, None
         self.turn_retries, self.turn_priority, self.local_gate, self.turn_localize, self.turn_protect = 0, False, 'legacy', False, False
         self.node_turn_request, self.repair_queue, self.repaired_in_turn, self.steps_remaining = {}, [], set(), 0
+        self.source_invariants = None
         self.single_stage_verify, self.focused_turn, self.smart_turn_pass = False, False, False
         self.cascade_priority, self.repair_gate, self.monotonic_turn, self.candidate_k = False, False, False, 1
 
@@ -429,6 +460,21 @@ class ReDAGHarness:
         if node_id in self.node_turn_request:
             return self.node_turn_request[node_id]
         return '' if self.node_turn_request else self.turn_request
+
+    def active_source_invariants(self, dag):
+        if self.draft_first_turn:
+            return set()
+        if self.source_invariants is not None:
+            inv = {
+                nid for nid in self.source_invariants
+                if nid in dag.nodes and all(is_source_invariant_id(a) for a in graph_ancestors(dag, nid))
+            }
+        else:
+            inv = {
+                nid for nid in dag.nodes
+                if is_source_invariant_id(nid) and all(is_source_invariant_id(a) for a in graph_ancestors(dag, nid))
+            }
+        return inv if any(n not in inv for n in dag.nodes) else set()
 
     def turn_targets(self, dag, state):
         if not self.turn_pass or self.mode != 'redag_full' or not self.turn_request.strip():
@@ -505,16 +551,6 @@ class ReDAGHarness:
     def evaluate_best_of_k(self, state, graph, target_node_id, action, editor, seed, mask, route, targets=None, k_count=1):
         targets = list(targets or [target_node_id])
         eff = self.effective_graph(graph)
-        whole = box_area(action.box) >= WHOLE_CANVAS_SHARE
-        joint = route in ('global', 'turn')
-        if joint and whole:
-            est_affected = len(eff.nodes)
-        elif route == 'turn':
-            est_affected = len(set().union(*(compute_affected_subgraph(eff, action, t, state.protected_set) for t in targets)))
-        elif self.mode == 'redag_full':
-            est_affected = len(compute_affected_subgraph(eff, action, target_node_id, state.protected_set))
-        else:
-            est_affected = len(eff.nodes)
         base_gf, base_lf = dict(self.global_failures), dict(self.local_failures)
         evaluated = []
         for k_idx in range(k_count):
@@ -530,24 +566,6 @@ class ReDAGHarness:
             render_seed = seed if k_idx == 0 else seed + k_idx * 10007
             self.generation_counter += 1
             crop, editable = self.render(editor, state, action, render_seed, mask)
-            if k_idx > 0 and est_affected > len(targets) + 1:
-                feather = 0 if joint and whole else self.feather_px
-                pasted = paste_window_strictly_local(state.image, crop, action.box, feather, editable)
-                self.verifier.two_stage = (
-                    (self.mode not in BASELINE_MODES) and not (self.single_stage_verify and self.mode == 'redag_full')
-                )
-                rec_len = len(self.verifier.records)
-                try:
-                    q1 = {t: self.verifier.verify_single_node_two_stage(pasted, eff.nodes[t], eff) for t in targets}
-                except RuntimeError as error:
-                    del self.verifier.records[rec_len:]
-                    if str(error) != 'Verifier call budget exhausted':
-                        raise
-                    break
-                del self.verifier.records[rec_len:]
-                min_gain = self.config.min_target_gain
-                if not any(q1[t] >= eff.nodes[t].threshold or q1[t] - state.scores.get(t, 0.0) >= min_gain for t in targets):
-                    continue
             self.global_failures, self.local_failures = dict(base_gf), dict(base_lf)
             try:
                 self.evaluate_candidate_action(state, graph, target_node_id, action, crop, editable, route=route, targets=targets)
@@ -737,40 +755,104 @@ class ReDAGHarness:
         else:
             affected = set(graph.nodes)
         uncertain = {n for n, node in dag.nodes.items() if node.node_type in ('entity', 'attribute') and edit_footprint(dag, n) is None}
-        raw_scores = self.verifier.verify_subgraph_after_edit(candidate, graph, parent_state.scores, affected)
-        refuted = []
-        target_gain = raw_scores[target_node_id] - parent_state.scores[target_node_id]
-        if not joint and self.confirm_drops and self.mode == 'redag_full' and (target_gain >= self.config.min_target_gain or raw_scores[target_node_id] >= dag.nodes[target_node_id].threshold):
-            raw_scores, refuted = self.confirm_protected_drops(parent_state, graph, target_node_id, action, candidate, raw_scores, affected)
-        if self.strategy is not None and self.mode == 'redag_full':
-            accepted = self.strategy_acceptance(graph, targets, parent_state, raw_scores, affected, route)
-        elif joint:
-            accepted = joint_acceptance(graph, targets, parent_state.scores, raw_scores, parent_state.protected_set, affected,
-                                        self.config.min_target_gain, self.turn_gate if route == 'turn' else self.global_gate)
-        elif self.local_gate == 'net2':
-            accepted = net_progress_acceptance(graph, targets, parent_state.scores, raw_scores, self.config.min_target_gain)
-        else:
-            accepted = check_local_acceptance(graph, target_node_id, parent_state.scores, raw_scores, parent_state.protected_set, affected,
-                                             self.config.min_target_gain, self.config.max_protected_drop)
-        repair_drop = None
-        if not accepted and self.repair_gate and self.mode == 'redag_full' and self.steps_remaining > 0:
-            has_render = self.render_limit is None or self.generation_counter < self.render_limit
-            has_cost = (
-                self.cost_budget is None
-                or self.cost_origin is None
-                or self.spent_cost() + self.generation_cost <= self.cost_budget
-            )
-            if has_render and has_cost:
-                before_v, after_v = valid_nodes(graph, parent_state.scores), valid_nodes(graph, raw_scores)
-                hit = any(raw_scores[t] >= graph.nodes[t].threshold > parent_state.scores.get(t, 0.0) for t in targets)
-                drops = [v for v in graph.nodes if parent_state.scores.get(v, 0.0) >= graph.nodes[v].threshold > raw_scores.get(v, 0.0)]
-                if hit and len(after_v) >= len(before_v) and len(drops) == 1:
-                    d = drops[0]
-                    fp = edit_footprint(graph, d)
-                    no_cascade = unlocked_satisfied_descendants(graph, raw_scores, d) == 0
-                    if (d not in targets and d not in self.repaired_in_turn and not self.routes_globally(graph, d)
-                            and fp is not None and box_area(fp) < WHOLE_CANVAS_SHARE and no_cascade):
-                        accepted, repair_drop = True, d
+        prescreen_ok = (
+            self.single_stage_verify
+            and self.mode == 'redag_full'
+            and not self.counterfactual_credit
+            and self.strategy is None
+            and not (route == 'turn' and self.turn_retries > 0)
+            and hasattr(self.verifier, 'verify_single_node_two_stage')
+        )
+        pre_verified, fast_rejected = None, False
+        if prescreen_ok:
+            comp_parents = {nid: [] for nid in graph.nodes}
+            for p_id, c_id in graph.comp_edges:
+                if c_id in comp_parents:
+                    comp_parents[c_id].append(p_id)
+            needed, queue = set(), list(set(targets) & affected)
+            while queue:
+                cur = queue.pop()
+                if cur in needed or cur not in affected:
+                    continue
+                needed.add(cur)
+                queue.extend(p_id for p_id in comp_parents[cur] if p_id in affected and p_id not in needed)
+            if len(affected) > len(needed) + 1:
+                trial_scores, pre_verified = dict(parent_state.scores), {}
+                for v_id in topological_nodes(graph):
+                    if v_id not in needed:
+                        continue
+                    if any(trial_scores.get(p_id, 0.0) < self.verifier.gate_tau for p_id in comp_parents[v_id]):
+                        trial_scores[v_id] = 0.0
+                    else:
+                        val = self.verifier.verify_single_node_two_stage(candidate, graph.nodes[v_id], graph)
+                        trial_scores[v_id] = val
+                        pre_verified[v_id] = val
+                min_gain = self.config.min_target_gain
+                target_ok = any(
+                    trial_scores[t] >= graph.nodes[t].threshold
+                    or trial_scores[t] - parent_state.scores.get(t, 0.0) >= min_gain
+                    for t in targets
+                )
+                if not target_ok:
+                    raw_scores = trial_scores
+                    fast_rejected = True
+        refuted, accepted, repair_drop = [], False, None
+        if not fast_rejected:
+            if pre_verified:
+                raw_scores = self.verifier.verify_subgraph_after_edit(
+                    candidate, graph, parent_state.scores, affected, pre_verified=pre_verified
+                )
+            else:
+                raw_scores = self.verifier.verify_subgraph_after_edit(candidate, graph, parent_state.scores, affected)
+            target_gain = raw_scores[target_node_id] - parent_state.scores[target_node_id]
+            has_gain = target_gain >= self.config.min_target_gain or raw_scores[target_node_id] >= dag.nodes[target_node_id].threshold
+            if not joint and self.confirm_drops and self.mode == 'redag_full' and has_gain:
+                raw_scores, refuted = self.confirm_protected_drops(
+                    parent_state, graph, target_node_id, action, candidate, raw_scores, affected
+                )
+            if self.strategy is not None and self.mode == 'redag_full':
+                accepted = self.strategy_acceptance(graph, targets, parent_state, raw_scores, affected, route)
+            elif joint:
+                gate_name = self.turn_gate if route == 'turn' else self.global_gate
+                accepted = joint_acceptance(
+                    graph, targets, parent_state.scores, raw_scores,
+                    parent_state.protected_set, affected, self.config.min_target_gain, gate_name
+                )
+            elif self.local_gate == 'net2':
+                accepted = net_progress_acceptance(graph, targets, parent_state.scores, raw_scores, self.config.min_target_gain)
+            else:
+                accepted = check_local_acceptance(
+                    graph, target_node_id, parent_state.scores, raw_scores,
+                    parent_state.protected_set, affected, self.config.min_target_gain, self.config.max_protected_drop
+                )
+            if not accepted and self.repair_gate and self.mode == 'redag_full' and self.steps_remaining > 0:
+                has_render = self.render_limit is None or self.generation_counter < self.render_limit
+                has_cost = (
+                    self.cost_budget is None
+                    or self.cost_origin is None
+                    or self.spent_cost() + self.generation_cost <= self.cost_budget
+                )
+                if has_render and has_cost:
+                    before_v, after_v = valid_nodes(graph, parent_state.scores), valid_nodes(graph, raw_scores)
+                    hit = any(raw_scores[t] >= graph.nodes[t].threshold > parent_state.scores.get(t, 0.0) for t in targets)
+                    drops = [
+                        v for v in graph.nodes
+                        if parent_state.scores.get(v, 0.0) >= graph.nodes[v].threshold > raw_scores.get(v, 0.0)
+                    ]
+                    if hit and len(after_v) >= len(before_v) and len(drops) == 1:
+                        d = drops[0]
+                        fp = edit_footprint(graph, d)
+                        no_cascade = unlocked_satisfied_descendants(graph, raw_scores, d) == 0
+                        prohibited = {
+                            norm_entity_stem(n.entity_phrase)
+                            for n in graph.nodes.values()
+                            if n.node_type == 'prohibition' and n.entity_phrase.strip()
+                        }
+                        d_stem = norm_entity_stem(graph.nodes[d].entity_phrase)
+                        if (d not in targets and d not in self.repaired_in_turn and not self.routes_globally(graph, d)
+                                and fp is not None and box_area(fp) < WHOLE_CANVAS_SHARE
+                                and no_cascade and (not d_stem or d_stem not in prohibited)):
+                            accepted, repair_drop = True, d
         if not accepted and route in ('global', 'local'):
             failures = self.global_failures if route == 'global' else self.local_failures
             key = (self.turn_index, target_node_id)
@@ -960,6 +1042,20 @@ class ReDAGHarness:
                 if turn_targets and step == 0 and self.strategy is not None and self.mode == 'redag_full' and not self.strategy.decide('turn', self.turn_features(state, dag, turn_targets)):
                     turn_targets = []
                 frontier = self.active_frontier(dag, state.scores)
+                if self.focused_turn and self.mode == 'redag_full' and not self.draft_first_turn:
+                    inv = self.active_source_invariants(dag)
+                    if inv:
+                        eff_g = self.effective_graph(dag)
+                        frontier_set, repair_set = set(frontier), set(self.repair_queue)
+                        blocked_edits = [
+                            u for u in dag.nodes
+                            if u not in inv and state.scores.get(u, 0.0) < dag.nodes[u].threshold and u not in frontier_set
+                        ]
+                        unblocking = (
+                            set().union(*(graph_ancestors(eff_g, u) for u in blocked_edits))
+                            if blocked_edits else set()
+                        )
+                        frontier = [nid for nid in frontier if nid not in inv or nid in repair_set or nid in unblocking]
                 if not frontier and not turn_targets:
                     reason = 'satisfied' if all(state.scores[n] >= dag.nodes[n].threshold for n in dag.nodes) else 'blocked_frontier'
                     break
@@ -1042,6 +1138,7 @@ class ReDAGHarness:
         from redag.models.planner import preserve_previous_conditions
         dag, state, records = None, None, []
         self.node_turn_request = {}
+        self.source_invariants = set()
         self.turn_count = len(prompts)
         for turn, request in enumerate(prompts):
             request = {'user_prompt': request} if isinstance(request, str) else request
@@ -1055,12 +1152,24 @@ class ReDAGHarness:
                 kwargs = {'superseded_ids': superseded} if superseded is not None else {}
                 dag = planner.plan(request['user_prompt'], previous_dag=previous, **kwargs)
                 dag = preserve_previous_conditions(dag, previous, superseded if superseded is not None else getattr(planner, 'last_superseded_ids', []))
-            self.turn_nodes = set(dag.nodes) - (set(previous.nodes) if previous is not None else set())
+            raw_new = set(dag.nodes) - (set(previous.nodes) if previous is not None else set())
+            if turn == 0 and not self.draft_first_turn:
+                self.source_invariants = {
+                    nid for nid in raw_new
+                    if is_source_invariant_id(nid) and all(is_source_invariant_id(a) for a in graph_ancestors(dag, nid))
+                }
+            elif not self.draft_first_turn:
+                self.source_invariants = {
+                    nid for nid in (self.source_invariants - set(superseded or ()))
+                    if nid in dag.nodes and all(is_source_invariant_id(a) for a in graph_ancestors(dag, nid))
+                }
+            inv_now = self.active_source_invariants(dag) if (self.focused_turn and self.mode == 'redag_full') else set()
+            self.turn_nodes = (raw_new - inv_now) if inv_now else raw_new
             for nid in list(self.node_turn_request):
                 if nid not in dag.nodes:
                     del self.node_turn_request[nid]
-            for nid in self.turn_nodes | (set(superseded or ()) & set(dag.nodes)):
-                is_src_inv = turn == 0 and not self.draft_first_turn and bool(re.match(r'^(?:i|u)\d+$', nid))
+            for nid in raw_new | (set(superseded or ()) & set(dag.nodes)):
+                is_src_inv = not self.draft_first_turn and nid in self.source_invariants
                 self.node_turn_request[nid] = '' if is_src_inv else self.turn_request
             if state is None:
                 state, dag = self.initialize(image, dag)
@@ -1117,6 +1226,7 @@ def run_record(record, harness, controller, editor, max_steps=10, seed=42, group
         harness.render_limit = min(generation_limits, default=None)
     harness.turn_request, harness.turn_nodes, harness.turn_index = '', set(), 0
     harness.node_turn_request = {}
+    harness.source_invariants = None
     harness.global_failures, harness.local_failures, harness.turn_count = {}, {}, 1
     harness.draft_first_turn = record.get('kind') == 't2i'
     try:
@@ -1134,6 +1244,7 @@ def run_record(record, harness, controller, editor, max_steps=10, seed=42, group
         harness.verifier.call_limit, harness.render_limit = limits
         harness.cost_origin = None
         harness.node_turn_request = {}
+        harness.source_invariants = None
 
 
 def add_runtime_arguments(parser):

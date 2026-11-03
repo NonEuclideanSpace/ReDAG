@@ -231,3 +231,163 @@ def test_clean_controller_instruction():
     )
     out, count, changed = clean_controller_instruction('Make the mug red', tok)
     assert 'unchanged' in out and count < 30 and changed
+
+
+def test_target_first_fast_reject_and_no_double_verify():
+    nodes = {'t': node('t', 'count', 'Are there 3 cups?', 'cup', scope='global')}
+    for idx in range(1, 9):
+        nodes[f'p{idx}'] = node(f'p{idx}', 'entity', f'Is p{idx} ok?', f'p{idx}', (0.1, 0.1, 0.3, 0.3))
+    dag = ConditionDAG(nodes)
+    init_scores = {'t': 0.1, **{f'p{idx}': 0.95 for idx in range(1, 9)}}
+    state = CanvasState(torch.zeros(3, 16, 16), init_scores, {f'p{idx}' for idx in range(1, 9)})
+
+    def render_fn(img, act, seed=42, mask=None):
+        val = 0.8 if seed == 42 + 2 * 10007 else 0.2
+        return torch.full((3, 16, 16), val)
+
+    def score_fn(img, q):
+        m = float(img.mean())
+        if 'cups' in q:
+            return 0.92 if m > 0.5 else 0.05
+        return 0.95
+
+    ver = TwoStageVerifier(score_fn)
+    h = configure_routing(
+        ReDAGHarness(ver, None, feather_px=0),
+        SimpleNamespace(
+            scope_routing=True, global_gate='net2', local_gate='net2',
+            single_stage_verify=True, candidate_k=3, global_retries=1,
+        ),
+    )
+    ctrl = SimpleNamespace(sample=lambda s, g, tid, **kw: {
+        'action': ControllerAction('modify_attr', (0.0, 0.0, 1.0, 1.0), 'Edit.')
+    })
+    out_s, _, steps = h.run_session(state, dag, ctrl, SimpleNamespace(render=render_fn), max_steps=1, seed=42)
+    assert steps[0]['accepted'] and out_s.scores['t'] >= 0.7
+    assert ver.call_counter == 1 + 1 + 9
+
+    ver2 = TwoStageVerifier(lambda img, q: 0.05 if 'cups' in q else 0.95)
+    h2 = configure_routing(
+        ReDAGHarness(ver2, None, feather_px=0),
+        SimpleNamespace(
+            scope_routing=True, global_gate='net2', local_gate='net2',
+            single_stage_verify=True, candidate_k=3, global_retries=1,
+        ),
+    )
+    h2.run_session(state, dag, ctrl, SimpleNamespace(render=lambda img, act, seed=42, mask=None: img), max_steps=1, seed=42)
+    assert ver2.call_counter == 3
+    assert h2.global_failures.get((0, 't')) == 1
+
+
+def test_i2i_source_invariant_isolation_and_prohibited_repair():
+    i1 = node('i1', 'entity', 'Is table there?', 'table', (0.1, 0.5, 0.9, 0.9))
+    i12 = node('i12', 'count', 'Are there two hot dogs?', 'hot dog', scope='global')
+    i14 = node('i14', 'attribute', 'Is hot dog topped with relish?', 'hot dog', (0.2, 0.2, 0.5, 0.5))
+    t1_1 = node('t1_1', 'entity', 'Is chocolate cake there?', 'cake', (0.2, 0.2, 0.6, 0.6))
+    t1_2 = node('t1_2', 'prohibition', 'Is image free of hot dogs?', 'hot dog', scope='global')
+    dag = ConditionDAG({'i1': i1, 'i12': i12, 'i14': i14, 't1_1': t1_1, 't1_2': t1_2})
+
+    def score_i2i(img, q):
+        m = float(img.mean())
+        if 'two hot dogs' in q:
+            return 0.1
+        if 'chocolate cake' in q or 'free of hot dogs' in q:
+            return 0.95 if m > 0.4 else 0.05
+        if 'relish' in q:
+            return 0.4 if m > 0.4 else 0.9
+        return 0.95
+
+    h = configure_routing(
+        ReDAGHarness(TwoStageVerifier(score_i2i), None, feather_px=0),
+        SimpleNamespace(
+            turn_pass=True, focused_turn=True, turn_priority=True,
+            turn_gate='net2', global_gate='net2', local_gate='net2',
+            repair_gate=True, single_stage_verify=True,
+        ),
+    )
+    rec = {
+        'kind': 'i2i',
+        'image': torch.zeros(3, 16, 16),
+        'turns': [{'user_prompt': 'Put chocolate cake instead of hot dog.', 'graph': {
+            'nodes': [
+                {'node_id': k, 'node_type': v.node_type, 'question': v.question,
+                 'entity_phrase': v.entity_phrase, 'bbox': v.bbox, 'scope': v.scope,
+                 'threshold': v.threshold, 'weight': v.weight, 'depends_on': v.depends_on}
+                for k, v in dag.nodes.items()
+            ],
+            'comp_edges': [], 'supp_edges': [], 'int_edges': [],
+        }}],
+    }
+    ctrl = SimpleNamespace(sample=lambda s, g, tid, **kw: {
+        'action': ControllerAction('add_entity', (0.0, 0.0, 1.0, 1.0), f'Edit {tid}.')
+    })
+    ed = SimpleNamespace(render=lambda img, act, seed=42, mask=None: torch.full((3, 16, 16), 0.8))
+    final_s, _, steps = run_record(rec, h, ctrl, ed, max_steps=4, seed=7)
+    assert final_s.scores['t1_1'] >= 0.7 and final_s.scores['t1_2'] >= 0.7
+    assert all(st['target_node_id'] != 'i12' for st in steps)
+    assert len(steps) == 1
+
+
+def test_source_invariant_unblocking_and_misnamed_edits():
+    i10 = node('i10', 'entity', 'Is table there?', 'table', (0.1, 0.5, 0.9, 0.9))
+    i5 = node('i5', 'entity', 'Is lamp there?', 'lamp', (0.7, 0.1, 0.9, 0.3))
+    t1_1 = node('t1_1', 'entity', 'Is croissant there?', 'croissant', (0.2, 0.5, 0.6, 0.8))
+    i13 = node('i13', 'attribute', 'Does croissant have cheese?', 'croissant', (0.2, 0.5, 0.6, 0.8), depends_on=['t1_1'])
+    t2_2 = node('t2_2', 'relation', 'Is cake on table?', 'cake', (0.2, 0.5, 0.8, 0.9), depends_on=['i10'])
+    dag = ConditionDAG(
+        {'i10': i10, 'i5': i5, 't1_1': t1_1, 'i13': i13, 't2_2': t2_2},
+        comp_edges=[('t1_1', 'i13'), ('i10', 't2_2')],
+    )
+    h = configure_routing(
+        ReDAGHarness(TwoStageVerifier(lambda img, q: 0.9), None, feather_px=0),
+        SimpleNamespace(focused_turn=True, turn_priority=True, local_gate='net2', single_stage_verify=True),
+    )
+    inv = h.active_source_invariants(dag)
+    assert inv == {'i10', 'i5'} and 'i13' not in inv
+
+    visited = []
+    ctrl = SimpleNamespace(sample=lambda s, g, tid, **kw: (
+        visited.append(tid) or {'action': ControllerAction('add_entity', (0.0, 0.0, 1.0, 1.0), f'Edit {tid}.')}
+    ))
+    ed = SimpleNamespace(render=lambda img, act, seed=42, mask=None: torch.ones(3, 16, 16))
+    st = CanvasState(torch.zeros(3, 16, 16), {'i10': 0.3, 'i5': 0.3, 't1_1': 0.9, 'i13': 0.2, 't2_2': 0.2}, {'t1_1'})
+    out_s, _, _ = h.run_session(st, dag, ctrl, ed, max_steps=3, seed=1)
+    assert 'i10' in visited or out_s.scores['t2_2'] >= 0.7
+    assert 'i5' not in visited
+
+    rec_mt = {
+        'kind': 'i2i',
+        'image': torch.zeros(3, 16, 16),
+        'turns': [
+            {'user_prompt': 'Make pizza a croissant.', 'graph': {
+                'nodes': [
+                    {'node_id': 'i5', 'node_type': 'entity', 'question': 'Lamp?', 'entity_phrase': 'lamp',
+                     'bbox': (0.7, 0.1, 0.9, 0.3), 'scope': 'local', 'threshold': 0.7, 'weight': 1.0, 'depends_on': []},
+                    {'node_id': 't1_1', 'node_type': 'entity', 'question': 'Croissant?', 'entity_phrase': 'croissant',
+                     'bbox': (0.2, 0.5, 0.6, 0.8), 'scope': 'local', 'threshold': 0.7, 'weight': 1.0, 'depends_on': []},
+                ],
+                'comp_edges': [], 'supp_edges': [], 'int_edges': [],
+            }},
+            {'user_prompt': 'Cut kiwi in half.', 'graph': {
+                'nodes': [
+                    {'node_id': 'i15', 'node_type': 'attribute', 'question': 'Kiwi cut?', 'entity_phrase': 'kiwi',
+                     'bbox': (0.3, 0.3, 0.5, 0.5), 'scope': 'local', 'threshold': 0.7, 'weight': 1.0, 'depends_on': []},
+                ],
+                'comp_edges': [], 'supp_edges': [], 'int_edges': [],
+            }},
+        ],
+    }
+    seen_t2 = []
+    h2 = configure_routing(
+        ReDAGHarness(TwoStageVerifier(lambda img, q: 0.2 if 'Kiwi' in q else 0.9), None, feather_px=0),
+        SimpleNamespace(
+            turn_pass=False, focused_turn=True, turn_priority=True,
+            user_text=True, local_gate='net2', single_stage_verify=True,
+        ),
+    )
+    ctrl2 = SimpleNamespace(sample=lambda s, g, tid, **kw: (
+        seen_t2.append((tid, h2.node_request(tid)))
+        or {'action': ControllerAction('modify_attr', (0.3, 0.3, 0.5, 0.5), 'Cut kiwi.')}
+    ))
+    run_record(rec_mt, h2, ctrl2, ed, max_steps=1, seed=2)
+    assert ('i15', 'Cut kiwi in half.') in seen_t2
