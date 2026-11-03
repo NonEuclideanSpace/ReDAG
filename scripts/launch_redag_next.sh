@@ -67,6 +67,7 @@ V2=(--turn_pass --scope_routing --user_text --turn_gate net2 --global_gate net2 
 V3=("${V2[@]}" --turn_localize)
 V4=("${V3[@]}" --turn_protect)
 RLF=(--turn_pass --scope_routing --user_text --global_retries 1 --turn_priority --turn_retries 2)
+RLF4=("${RLF[@]}" --turn_localize --turn_protect)
 
 silent_scores() {
   local include="${1:-.}" exclude="${2:-^$}" files=() f
@@ -261,6 +262,12 @@ case "${TASK}" in
     ;;
   chain_rl_t2i)
     for s in ${4:-0 1 2 10}; do eval_variant "rl$(basename "${ARG3}" .json)" "${s}" t2i "${RLF[@]}" --strategy_policy "${ARG3}"; done
+    ;;
+  chain_rl4_i2i)
+    for s in ${4:-0 1 2 10}; do eval_variant "rl4$(basename "${ARG3}" .json)" "${s}" i2i "${RLF4[@]}" --strategy_policy "${ARG3}"; done
+    ;;
+  chain_rl4_t2i)
+    for s in ${4:-0 1 2 10}; do eval_variant "rl4$(basename "${ARG3}" .json)" "${s}" t2i "${RLF4[@]}" --strategy_policy "${ARG3}"; done
     ;;
   net) eval_variant net "${ARG3:-0}" i2i "${NET[@]}" ;;
   mean2) eval_variant mean2 "${ARG3:-0}" i2i "${MEAN2[@]}" ;;
