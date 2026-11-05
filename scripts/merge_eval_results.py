@@ -1,11 +1,3 @@
-"""Merge run_eval_benchmarks.py parts (--shard / --stages) into one result file.
-
-Checks that the parts belong to the same experiment and budgets, re-applies the K-tier session counts
-that single-process runs enforce, and for experiment 3 draws the 200 blind pairs exactly as
-run_eval_benchmarks.py does (same seed, same canonical stage order).  The merged file can then be
-annotated with run_eval_benchmarks.py --resume_results <merged> --annotations/--human_ratings.
-  python scripts/merge_eval_results.py --inputs runs/eval/exp3_*.json --output runs/eval/exp3.json
-"""
 import argparse
 import json
 import random

@@ -1,16 +1,3 @@
-"""Benchmarks with per-prompt requirements -> unified raw sessions for graph annotation.
-
-  corebench : data/raw/corebench/splits/*.jsonl      T2I-CoReBench, yes/no checklists (kept verbatim)
-  lgbench   : data/raw/benchmarks/lgbench/{t2i,i2i}_1000.json   LGBench goal lists (rephrased into yes/no questions)
-  longbench : data/raw/benchmarks/longbench_t2i/instruction.jsonl   LongBench-T2I long prompts (+ per-aspect labels)
-
-LGBench I2I base images are not distributed; when data/raw/benchmarks/lgbench/<source_image_path> is missing the
-session keeps image=null and canvas_prompt=simple_source_prompt, so build_sets.py queues a FLUX.2-klein render.
---canvas_dir: an extracted T2I-CoReBench-Images model folder; its first sample per prompt becomes the canvas.
-
-Output rows (data/processed/sessions/<name>.jsonl):
-  {id, source, kind: t2i|i2i, split, prompt, image|null, canvas_prompt?, checklist?: [{qid, question, tags, fixed}], hints?}
-"""
 import argparse
 import ast
 import json

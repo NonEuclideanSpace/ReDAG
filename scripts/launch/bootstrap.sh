@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Prepare a fresh AutoDL instance for ReDAG.  Idempotent: rerun after any interruption.  AutoDL no-GPU mode is enough
-# (and cheapest) for everything here; switch to GPU mode afterwards and run `bash scripts/launch/go.sh`.
-#
-#   bash scripts/launch/bootstrap.sh                          packages + model weights (~120 GiB) + checks
-#   bash scripts/launch/bootstrap.sh --data-bundle FILE       ... and import a data bundle (manifest from `go.sh bundle export data`)
-#   bash scripts/launch/bootstrap.sh --skip-models            e.g. on a cloned instance that already has the weights
-#
-# Expected base image: Python 3.12, torch 2.12.x built for CUDA 13.0 (see scripts/launch/requirements.lock.txt).
 source "$(dirname "$0")/env.sh"
 cd "$REDAG_ROOT" || exit 1
 BUNDLE="" SKIP_MODELS=0

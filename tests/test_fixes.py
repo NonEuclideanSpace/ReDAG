@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 
 
 class PixelVAE(torch.nn.Module):
-    """Lossless stand-in for the FLUX.2 VAE: 8x pixel-unshuffle (fails on sizes that are not multiples of 8)."""
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace(block_out_channels=[1, 1, 1, 1], batch_norm_eps=0.0)
@@ -36,7 +35,7 @@ class PixelVAE(torch.nn.Module):
 
 
 def pixel_editor():
-    editor = FluxEditor.__new__(FluxEditor)  # bypass the pipeline checks; only the latent layout is under test
+    editor = FluxEditor.__new__(FluxEditor)
     editor.vae, editor.transformer = PixelVAE(), torch.nn.Linear(1, 1)
     return editor
 
@@ -49,7 +48,7 @@ def test_vae_roundtrip_crops_without_inventing_border_pixels(size):
     assert latent.shape[-2:] == tuple(-(-max(s, 16) // 16) for s in size) or min(size) < 16
     decoded = editor.decode_latents(latent, output_size=size)
     assert decoded.shape == (1, 3, *size)
-    if min(size) >= 16:  # no rescaling: exact reconstruction, i.e. no replicated rows or columns
+    if min(size) >= 16:
         assert torch.allclose(decoded[0], image, atol=1e-6)
     mask = torch.zeros(1, 1, *size)
     mask[..., size[0] // 4:, size[1] // 4:] = 1
@@ -74,12 +73,12 @@ def test_validate_dataset_requires_graphs_after_planning():
              for i in range(10)]
     planned = [{'turns': [{'user_prompt': 'x', 'graph': {'nodes': nodes}}]}]
     unplanned = planned + [{'turns': ['draw something']}]
-    validate_dataset(unplanned, 1, False)  # planner still to run: tiers are checked later
+    validate_dataset(unplanned, 1, False)
     with pytest.raises(ValueError):
         validate_dataset(unplanned, 1, False, require_graphs=True)
     with pytest.raises(ValueError):
-        validate_dataset(planned, 1, False, require_graphs=True)  # one session is not 100 per tier
-    validate_dataset(planned, 1, True, require_graphs=True)  # diagnostic runs skip the tier rule
+        validate_dataset(planned, 1, False, require_graphs=True)
+    validate_dataset(planned, 1, True, require_graphs=True)
 
 
 def test_lora_targets_cover_every_decoder_projection_but_not_vision():
@@ -140,7 +139,7 @@ def test_rejection_sampling_resumes_without_duplicates(tmp_path):
     first = collect_controller_rs(records, harness, controller, editor, output)
     assert first['accepted'] == 3
     with output.open('a') as stream:
-        stream.write('{"id": "s9", "trunc')  # crash in the middle of a write
+        stream.write('{"id": "s9", "trunc')
     second = collect_controller_rs(records, harness, controller, editor, output)
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert second == {'parents': 3, 'accepted': 0, 'previously_accepted': 3}

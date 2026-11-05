@@ -1,19 +1,3 @@
-"""MagicBrush parquet -> aligned turn images, binary edit masks, editor-SFT crops and I2I sessions.
-
-Phase 1 (extract) streams one image column at a time out of each parquet file, so the peak
-memory is one column chunk (~200 MB) instead of a whole shard; it only writes the original
-bytes to disk.  Phase 2 (build) works turn by turn:
-  * aligns source to target size (identity / resize / center-crop+resize, lowest error wins),
-  * decides the editable mask from mask_img (alpha / white / black convention, whichever best
-    matches the source->target difference) and falls back to a dilated difference mask,
-  * writes full-size aligned images + a binary mask (255 = editable),
-  * crops a window around the edit (mask box x1.25, >= 25% side) for editor SFT (eq. 21-24 use
-    crop windows I_src, I_tgt and mask M).
-Outputs
-  data/processed/magicbrush/turns_<split>.jsonl
-  data/processed/sessions/magicbrush_<split>.jsonl          (I2I sessions for graph annotation)
-  data/final/editor_sft_<split>.jsonl                        (input of scripts/run_sft_editor.py)
-"""
 import argparse
 import io
 import json
@@ -37,7 +21,6 @@ def image_bytes(value):
 
 
 def extract(split):
-    """Phase 1: parquet -> raw image files + turns_raw_<split>.jsonl (idempotent per shard)."""
     import pyarrow.parquet as pq
     raw_dir = OUT / 'raw_images' / split
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -87,7 +70,6 @@ def to_array(image):
 
 
 def align_source(source, target):
-    """Return (aligned_source, rule, mean_abs_error) mapping source onto the target canvas."""
     if source.size == target.size:
         return source.convert('RGB'), 'identity', float(np.abs(to_array(source) - to_array(target)).mean())
     tgt = to_array(target)
@@ -103,7 +85,6 @@ def align_source(source, target):
 
 
 def decide_mask(mask_image, diff):
-    """Binary editable mask (H, W) on the target grid and the rule that produced it."""
     h, w = diff.shape
     candidates = {}
     if mask_image is not None:
@@ -143,11 +124,11 @@ def build_turn(task):
     if target is None or source is None:
         return None, 'missing_image', img_id
     target = target.convert('RGB')
-    if size and max(target.size) > size:  # MagicBrush targets are 1024 px; the content is ~512 px COCO
+    if size and max(target.size) > size:
         scale = size / max(target.size)
         target = target.resize((round(target.size[0] * scale), round(target.size[1] * scale)), Image.BICUBIC)
     if previous_target is not None and Path(previous_target).exists():
-        with Image.open(previous_target) as chained:  # later turns start from the previous (aligned) target
+        with Image.open(previous_target) as chained:
             source = chained.convert('RGB').copy()
     source, rule, error = align_source(source, target)
     diff = np.abs(to_array(source) - to_array(target)).mean(axis=2)
@@ -192,10 +173,9 @@ def build(split, workers, size):
     for (img_id, turn), row in sorted(rows.items(), key=lambda item: (item[0][0], item[0][1])):
         sessions[img_id].append(row)
     records, status = [], Counter()
-    # turns of a session must run in order (turn t>1 starts from the aligned target of turn t-1)
     max_turns = max(len(v) for v in sessions.values())
     previous = {}
-    broken = set()  # sessions whose chain is interrupted: later turns would start from the wrong image
+    broken = set()
     with Pool(max(1, workers)) as pool:
         for position in range(max_turns):
             tasks = [(split, turns[position], previous.get(img_id), size) for img_id, turns in sessions.items()
@@ -216,7 +196,7 @@ def build(split, workers, size):
     session_rows = []
     for img_id, turns in sorted(by_session.items()):
         turns = sorted(turns, key=lambda t: t['turn'])
-        turns = [t for i, t in enumerate(turns) if t['turn'] == i + 1]  # gap-free prefix 1..T
+        turns = [t for i, t in enumerate(turns) if t['turn'] == i + 1]
         if not turns:
             continue
         session_rows.append({'id': f'mb:{split}:{img_id}', 'source': 'magicbrush', 'kind': 'i2i', 'split': split,

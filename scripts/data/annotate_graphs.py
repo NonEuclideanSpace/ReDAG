@@ -1,20 +1,3 @@
-"""Raw sessions -> validated condition DAGs (GPU step; resumable; shardable across GPUs).
-
-checklist mode (CoReBench / LGBench): every checklist item becomes a node with its original id and
-question; the LLM only adds structure (types, entity phrases, scope, dependencies, comp/supp/int
-edges) and may add entity nodes e1.. for objects that relations refer to.
-instruction mode (MagicBrush): the LLM sees the starting image and every turn's instruction and
-returns edit conditions t<turn>_<k> plus up to 24 inventory conditions i<k> (visible facts no
-request should change -> protected conditions used to reach K = 10/20/30).
-
-Every answer is validated with the repository's own ConditionDAG (via preserve_previous_conditions);
-invalid answers are retried with the error message, then replaced by a heuristic fallback that is
-flagged so build_sets.py can exclude it.  --heuristic runs the fallback only (no GPU), which is how
-the downstream pipeline is smoke-tested in no-GPU mode.
-
-  python scripts/data/annotate_graphs.py --sessions data/processed/sessions/corebench.jsonl --device cuda:0
-  python scripts/data/annotate_graphs.py --sessions ... --shard 1 --num_shards 2 --device cuda:1
-"""
 import argparse
 import json
 import re
@@ -40,7 +23,6 @@ Edges: comp_edges [entity id, dependent attribute/relation id]; supp_edges [supp
 (e.g. table -> cup on the table); int_edges [id, id] for similar or overlapping objects that an edit of one may disturb.
 No dependency cycles. Return {"nodes": [...], "comp_edges": [...], "supp_edges": [...], "int_edges": [...]}
 Write the JSON compactly on a single line, without indentation or line breaks: large graphs must fit the answer length limit."""
-# MagicBrush turn prompts are the users' own instructions (build_sets.turn_prompt), so statements would be unused tokens
 INSTRUCTION_RULES = FIELD_RULES.replace(', expected_count, statement.', ', expected_count.').replace(
     '- statement: the requirement as one short declarative sentence.\n', '')
 CUT_OFF = ('the answer was cut off before the JSON was complete (answer length limit); write the complete graph again as '
@@ -48,14 +30,12 @@ CUT_OFF = ('the answer was cut off before the JSON was complete (answer length l
 
 
 def reason(error):
-    """Validation error without ids, for the per-batch counts in the log."""
     text = re.sub(r"'[^']*'|\b\w*\d\w*\b", '#', str(error))
     text = re.split(r'[:\[]', text)[0].strip()[:60]
     return text if text.strip('# ') else f'{type(error).__name__} {str(error)[:40]}'
 
 
 def cut_off(text):
-    """Pretty-printed graphs with 25+ nodes ran past max_new_tokens; their retries need a different instruction."""
     return not str(text).rstrip().rstrip('`').rstrip().endswith('}')
 
 
@@ -98,11 +78,6 @@ def instruction_prompt(session, inventory):
 
 
 def extra_checklist_nodes(value, checklist, mode='checklist'):
-    """Answers often use the model's own ids (r1 for a relation, a1, t1, q41, ...).  Checklist mode: the conditions
-    must be exactly the checklist, so extra entity nodes become e<k> and every other extra node is dropped, the
-    checklist items that depended on it depending on its dependencies instead.  Decompose mode: all conditions are the
-    model's own, so extra nodes are only renamed (entities to e<k>, the rest to c<k>).
-    Returns (value with valid ids only, warnings)."""
     raw_nodes = [r for r in value.get('nodes', []) if isinstance(r, dict)]
     key = lambda raw: str(raw.get('node_id', '')).strip()
     allowed = (lambda nid: nid in checklist or re.fullmatch(r'e\d+', nid)) if mode == 'checklist' else (lambda nid: re.fullmatch(r'[ce]\d+', nid))
@@ -130,7 +105,7 @@ def extra_checklist_nodes(value, checklist, mode='checklist'):
     for raw in raw_nodes:
         nid = key(raw)
         if not nid:
-            nodes.append(raw)  # no id: ignored by to_graph as before
+            nodes.append(raw)
             continue
         if nid in dropped:
             continue
@@ -148,7 +123,6 @@ def extra_checklist_nodes(value, checklist, mode='checklist'):
 
 
 def to_graph(value, session, mode):
-    """LLM JSON -> (sanitized graph dict, statements, node_turn, superseded, warnings). Raises on invalid output."""
     checklist = {c['qid']: c for c in session.get('checklist', [])}
     raw_nodes = value.get('nodes', [])
     if isinstance(raw_nodes, dict):
@@ -210,7 +184,7 @@ def to_graph(value, session, mode):
         ids = [i for i in ids if node_turn.get(i, 99) < int(turn)] if str(turn).isdigit() else []
         if ids:
             superseded[str(int(turn))] = ids
-    build_dag(graph)  # full pool must be a valid ConditionDAG
+    build_dag(graph)
     return graph, statements, node_turn, superseded, warnings
 
 
@@ -220,7 +194,6 @@ REL_Q = re.compile(r'^if (?:both )?(?:the )?(.+?) and (?:the )?(.+?) are (?:both
 
 
 def heuristic(session, mode):
-    """Rule-based fallback / dry run: valid but conservative graphs (unknown scopes where unsure)."""
     nodes, statements, node_turn, comp = {}, {}, {}, []
     if mode == 'decompose':
         sentences = [s.strip() for s in re.split(r'(?<=[.!?;])\s+', session['prompt']) if len(s.split()) >= 3][:36]
@@ -270,13 +243,6 @@ def heuristic(session, mode):
 
 
 def gqa_decode_attention():
-    """sdpa attention whose decode steps read each key/value head once for all of its query heads.
-
-    With a padding mask (every left-padded batch) transformers' sdpa path calls repeat_kv: each step it copies the whole
-    cache 6x (24 query / 4 key-value heads in the 27B planner) and then reads the copy, ~80% of the decode time at batch
-    40.  Here a decode step instead treats the 6 query heads of a key/value head as 6 query positions of one sdpa call
-    (same mask for all of them, no causal masking among them): same attention, no copy.  Prefill and everything else
-    use the original function."""
     import torch
     try:
         from transformers import AttentionInterface
@@ -290,7 +256,7 @@ def gqa_decode_attention():
                 or kwargs.get('cache') is not None or kwargs.get('softcap') is not None):
             return sdpa_attention_forward(module, query, key, value, attention_mask, dropout=dropout, scaling=scaling, **kwargs)
         batch, heads, _, dim = query.shape
-        grouped = query.reshape(batch, key.shape[1], groups, dim)  # query head h uses key/value head h // groups
+        grouped = query.reshape(batch, key.shape[1], groups, dim)
         mask = None if attention_mask is None else attention_mask[..., -1:, :key.shape[2]]
         out = torch.nn.functional.scaled_dot_product_attention(grouped, key, value, attn_mask=mask, scale=scaling)
         return out.reshape(batch, 1, heads, dim), None
@@ -386,7 +352,7 @@ def main():
     from collections import Counter, deque
     from redag.models.planner import parse_json_object
     from redag.progress import report
-    items = []  # (session, mode, output file) still to annotate, over every session file of this shard
+    items = []
     for path in args.sessions:
         name = Path(path).stem + ('' if args.num_shards == 1 else f'.shard{args.shard}of{args.num_shards}')
         output = Path(args.output_dir) / f'{name}.jsonl'
@@ -403,24 +369,20 @@ def main():
             append_jsonl(output, record(session, mode, heuristic(session, mode), 'fallback', model_name, 0))
         log(f'{total} heuristic graphs written')
         return
-    # A generate() call lasts as long as its longest answer, so batches hold sessions of similar size (largest first),
-    # stay full (failed answers are retried inside the next batch instead of in a small batch of their own) and never
-    # mix text-only and image sessions.  An out-of-memory batch is split in half and retried.
     size = lambda session: len(json.dumps({k: session.get(k) for k in ('prompt', 'checklist', 'turns', 'hints')}, ensure_ascii=False))
-    # text-only modes share one queue (a few leftover retries of one mode never run as a batch of their own)
     text_limit = max(args.max_new_tokens, args.max_new_tokens_text)
     token_limit = {'checklist': text_limit, 'decompose': text_limit, 'instruction': args.max_new_tokens}
     for mode, modes in (('text', ('checklist', 'decompose')), ('instruction', ('instruction',))):
         group = sorted((it for it in items if it[1] in modes), key=lambda it: -size(it[0]))
         queue = deque(dict(session=s, mode=m, output=o, attempt=1, feedback=None, answer=None) for s, m, o in group)
-        limit = args.batch_size  # image prompts (~1k image tokens) are no longer than big checklists; OOM halves the batch
+        limit = args.batch_size
         full, streak = limit, 0
         while queue:
             batch = [queue.popleft() for _ in range(min(limit, len(queue)))]
             prepared = [messages(it['session'], it['mode'], args.inventory, it['feedback'], it['answer']) for it in batch]
             try:
                 outputs = generate(planner, [p[0] for p in prepared], [p[1] for p in prepared], max(token_limit[it['mode']] for it in batch))
-            except Exception as error:  # torch.OutOfMemoryError without importing torch here
+            except Exception as error:
                 if 'out of memory' not in str(error).lower() or limit == 1:
                     raise
                 import torch
@@ -430,7 +392,7 @@ def main():
                 log(f'out of memory: batch size {mode} -> {limit}')
                 continue
             streak += 1
-            if limit < full and streak >= 3:  # an out-of-memory batch (often long retries) must not halve the rest of the run
+            if limit < full and streak >= 3:
                 limit, streak = min(full, limit * 2), 0
             retry, reasons = [], Counter()
             for it, text in zip(batch, outputs):
@@ -451,7 +413,7 @@ def main():
                 append_jsonl(it['output'], record(it['session'], it['mode'], result, status, model_name, it['attempt']))
                 counts[status] += 1
                 done += 1
-            queue.extendleft(reversed(retry))  # next batch: the retries plus the next sessions of similar size
+            queue.extendleft(reversed(retry))
             log(f'{done}/{total} done {dict(counts)}; {len(retry)} to retry, {len(queue)} queued ({mode}, batch {limit})'
                 + (f'; invalid answers: {dict(reasons)}' if reasons else ''))
             report(done, total, 'sessions')

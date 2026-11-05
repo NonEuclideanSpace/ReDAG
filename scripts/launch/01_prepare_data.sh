@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Phase 1 - CPU only, safe in AutoDL no-GPU mode (0.5 core / 2 GiB): raw benchmarks -> sessions -> annotation plan.
-# Idempotent: finished steps are skipped (runs/logs/*.done).  Downloads (~32 GiB: MagicBrush ~25 GiB, CoReBench
-# FLUX.2-klein-9B canvases ~7 GiB) can wait for another job to end first: WAIT_PID=<pid> (e.g. the weight download).
-# MagicBrush dev is fetched and converted first so the converter is checked on real data early.
 source "$(dirname "$0")/env.sh"
 MB_SPLITS=${MB_SPLITS:-"dev train"}
 D=scripts/data

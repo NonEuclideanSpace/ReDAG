@@ -1,9 +1,3 @@
-"""Render the initial canvases queued in data/processed/canvases/requests.jsonl (GPU, resumable, shardable).
-
-Only sessions that build_sets.py actually selected are queued (T2I prompts, and LGBench I2I base scenes from
-simple_source_prompt).  Every request has a fixed seed, so all methods start from identical canvases.
-  python scripts/data/render_canvases.py --device cuda:1 --size 768 --steps 50
-"""
 import argparse
 from pathlib import Path
 

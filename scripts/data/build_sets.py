@@ -1,14 +1,3 @@
-"""Annotated condition graphs -> the JSONL files consumed by scripts/*.py (CPU only).
-
-Pools are fixed before anything is sampled: MagicBrush dev and a hash-selected share of every other
-benchmark are held out for evaluation; the rest feeds training.  Outputs in data/final:
-  eval_main.jsonl              K = 10/20/30 multi-turn sessions with exact final node counts
-  eval_credit.jsonl            small diagnostic subset for experiment 2
-  planner_sft.jsonl / _dev     (user_prompt, previous_dag, response) pairs, text-derivable nodes only
-  controller_rs_states.jsonl   N_state failure states for collect_controller_rs.py (eq. 19)
-  rl_train.jsonl / rl_dev.jsonl  failure states for run_rl_alternating.py (session-disjoint)
-  data/processed/canvases/requests.jsonl  T2I sessions that still need an initial canvas
-"""
 import argparse
 import hashlib
 import json
@@ -27,8 +16,6 @@ QUOTA = {30: {'corebench': 0.40, 'lgbench': 0.40, 'longbench': 0.10, 'magicbrush
 
 
 def load_graphs(folder, statuses, sessions_dir=None):
-    """Annotated sessions; canvas fields come from the current session files, because a session can be annotated
-    before its initial canvas is attached (the checklist benchmarks are annotated while CoReBench canvases download)."""
     current = {}
     for path in sorted(Path(sessions_dir or PROC / 'sessions').glob('*.jsonl')):
         for row in iter_jsonl(path):
@@ -47,7 +34,7 @@ def pool_of(row, eval_fraction):
     if row['source'] == 'magicbrush':
         return 'eval' if row.get('split') == 'dev' else 'train'
     if row['source'] == 'corebench' and not str(row.get('split', '')).startswith('C-'):
-        return 'train'  # reasoning splits: few, unusual conditions -> training only
+        return 'train'
     return 'eval' if stable_unit(row['id']) < eval_fraction else 'train'
 
 
@@ -74,7 +61,6 @@ def edit_ids(row, upto=None):
 
 
 def select_exact(nodes, parents, size, required, rng, exclude=frozenset(), tries=64):
-    """Dependency-closed node set of exactly `size` nodes that contains `required`, else None."""
     base = closure_all(required, parents)
     if len(base) > size or base & exclude:
         return None
@@ -82,7 +68,7 @@ def select_exact(nodes, parents, size, required, rng, exclude=frozenset(), tries
     for _ in range(tries):
         rng.shuffle(free)
         chosen = set(base)
-        for nid in sorted(free, key=lambda n: nodes[n]['node_type'] == 'entity'):  # structured nodes pull in entities
+        for nid in sorted(free, key=lambda n: nodes[n]['node_type'] == 'entity'):
             extra = closure(nid, parents) - chosen
             if not extra & exclude and len(chosen) + len(extra) <= size:
                 chosen |= extra
@@ -113,7 +99,7 @@ def session_turns(row, chosen, turns):
     else:
         bounds = [round(len(order) * (i + 1) / turns) for i in range(turns)]
         turn_of = {n: next(t + 1 for t, b in enumerate(bounds) if i < b) for i, n in enumerate(order)}
-    for n in order:  # never before its dependencies
+    for n in order:
         turn_of[n] = max([turn_of[n]] + [turn_of[d] for d in parents[n] if d in turn_of])
     out = []
     for t in range(1, max(turn_of.values()) + 1):
@@ -136,7 +122,6 @@ def merged(turns):
 
 
 def canvas_for(row, requests, seed):
-    """Initial canvas path; T2I sessions without one get a render request (prompt = the full original prompt)."""
     if row.get('image'):
         return row['image']
     digest = hashlib.sha1(row['id'].encode()).hexdigest()[:16]
@@ -181,12 +166,11 @@ def build_eval(sessions, per_tier, rng, requests, seed):
 
 
 def failure_state(row, rng, k_range):
-    """One failure state (image + merged graph) per training session."""
     nodes, parents = table(row)
     if row['mode'] == 'instruction':
         turn = rng.randint(1, len(row['turns']))
         image = row['image'] if turn == 1 else row['turns'][turn - 2]['target']
-        future = {n for n, t in row['node_turn'].items() if t > turn}  # later requests are not part of this state
+        future = {n for n, t in row['node_turn'].items() if t > turn}
         removed = frozenset(superseded_ids(row, turn)) | future
         edits = [n for n in edit_ids(row, turn) if n not in removed]
         inventory = [n for n in nodes if row['node_turn'].get(n) == 0]
@@ -206,7 +190,6 @@ def failure_state(row, rng, k_range):
 
 
 def planner_pairs(row, rng):
-    """Pairs for the text-only planner; image-only inventory facts are left out unless an edit refers to them."""
     from redag.models.planner import dag_to_dict
     nodes, parents = table(row)
     order = topo_order(nodes, row['graph']['comp_edges'], row['graph']['supp_edges'])
@@ -239,7 +222,6 @@ def planner_pairs(row, rng):
 
 
 def take(states, n, share, used):
-    """n states, `share` of them from MagicBrush when available, never reusing a session."""
     mb = [s for s in states if s['origin'] == 'magicbrush' and s['session_id'] not in used]
     other = [s for s in states if s['origin'] != 'magicbrush' and s['session_id'] not in used]
     picked = mb[:int(round(n * share))]
@@ -296,7 +278,7 @@ def main():
     dev = take(states, args.n_rl_dev, args.mb_state_share, used)
     rl = take(states, args.n_rl_train, args.mb_state_share, used)
     rs = take(states, args.n_rs_states, args.mb_state_share, used)
-    requests.update({sid: pending[sid] for sid in used if sid in pending})  # render only canvases that are used
+    requests.update({sid: pending[sid] for sid in used if sid in pending})
     pairs = []
     for row in train:
         try:

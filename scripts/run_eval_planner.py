@@ -1,15 +1,3 @@
-"""Graph-level evaluation of the planner (eq. 15-17) on held-out (request, previous graph) pairs.
-
-run_eval_benchmarks.py evaluates sessions with given condition graphs, so the planner's own quality is
-measured here: the zero-shot base model and the SFT adapter parse the same held-out requests and the
-predicted graphs are compared with the references.
-  validity            JSON parses and preserve_previous_conditions accepts the graph
-  node P/R/F1         new nodes matched by normalized question (exact, then token Jaccard >= 0.5)
-  type / scope acc.   on matched nodes
-  edge / dependency F1  comp, supp, int edges and depends_on pairs mapped through the node matching
-  superseded F1       explicit replacements
-  python scripts/run_eval_planner.py --data data/final/planner_sft_dev.jsonl --model <planner> [--adapter runs/sft/planner]
-"""
 import argparse
 import json
 import re
@@ -30,7 +18,6 @@ def tokens(text):
 
 
 def match_nodes(predicted, reference):
-    """Greedy one-to-one matching: exact normalized question first, then the best token-Jaccard >= 0.5."""
     pairs, used = {}, set()
     norm = {nid: ' '.join(sorted(tokens(n.question))) for nid, n in predicted.items()}
     for rid, ref in reference.items():
@@ -90,7 +77,7 @@ def score(record, text):
         out['type_acc'] = sum(ref_new[r].node_type == pred_new[p].node_type for r, p in pairs.items()) / len(pairs)
         out['scope_acc'] = sum(ref_new[r].scope == pred_new[p].scope for r, p in pairs.items()) / len(pairs)
     mapping = dict(pairs)
-    mapping.update({nid: nid for nid in old})  # retained nodes keep their IDs on both sides
+    mapping.update({nid: nid for nid in old})
     ref_edges = edge_sets(reference, set(ref_new))
     pred_edges = edge_sets(predicted, set(pred_new))
     inverse = {p: r for r, p in mapping.items()}

@@ -1,10 +1,3 @@
-"""Choose which raw sessions are sent to annotate_graphs.py (bounds its GPU cost to what the splits need).
-
-Evaluation needs 3 x 100 sessions with exact K, training needs ~1,150 failure states (1,000 rejection-
-sampling states + RL train/dev) plus planner pairs.  Annotating every benchmark prompt (~8k sessions)
-would cost ~15 GPU-h; these quotas (~2k sessions, about 2x what is consumed) keep it near 5 GPU-h.
-Pools come from build_sets.pool_of, so the held-out evaluation pool never leaks into training.
-"""
 import argparse
 from collections import Counter
 from pathlib import Path

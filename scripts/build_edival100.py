@@ -348,7 +348,6 @@ def main():
             f.write(json.dumps(r, ensure_ascii=False) + '\n')
     print(f'Wrote {len(records)} validated 3-turn EdiVal records to {out_jsonl}')
 
-    # Save official EdiVal metrics for the 100 selected sessions
     official_summary = {}
     for m in target_models:
         t1_if, t2_if, t3_if, t3_l1, t3_dino = [], [], [], [], []

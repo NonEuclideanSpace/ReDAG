@@ -28,7 +28,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--restore_best_editor", action="store_true")
     args = parser.parse_args()
-    if (Path(args.output) / 'rl_complete.json').exists():  # finished earlier: nothing to load or train
+    if (Path(args.output) / 'rl_complete.json').exists():
         print('already complete:', Path(args.output) / 'rl_complete.json')
         return
     if not args.controller_adapter or not args.editor_adapter:

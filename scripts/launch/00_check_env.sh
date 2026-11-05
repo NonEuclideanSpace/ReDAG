@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Preflight after switching to GPU mode (~5-10 min): GPUs, complete weights, kernels, unit tests, a full GPU
-# wiring check with tiny models (SFT, rejection sampling, alternating RL and an evaluation session), data files.
 source "$(dirname "$0")/env.sh"
 cd "$REDAG_ROOT" || exit 1
 status=0
@@ -38,8 +36,6 @@ if not is_flash_linear_attention_available():
           '(pip install flash-linear-attention)')
 EOF
 $PY -m pytest -q -p no:cacheprovider tests 2>&1 | tail -n 3 || status=1
-# flash-linear-attention speeds up Qwen3.5's Gated-DeltaNet layers (controller, planner) several-fold. Its Triton kernels
-# only work with a GPU, so it is installed here and kept only if the GPU wiring check passes with it.
 FLA_NEW=0
 if [ "${INSTALL_FLA:-1}" = 1 ] && ! $PY -c 'import fla' 2>/dev/null; then
     pip install -q flash-linear-attention > "$LOGS/pip_fla.log" 2>&1 && FLA_NEW=1 && echo "installed flash-linear-attention"

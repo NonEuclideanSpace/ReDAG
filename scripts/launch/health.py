@@ -1,10 +1,3 @@
-"""Pipeline health report: early warnings from what the jobs have written so far (standard library, a few seconds).
-
-  bash scripts/launch/go.sh health
-The scheduler refreshes runs/HEALTH.md and runs/state/health.json every 10 minutes (HEALTH_EVERY_MIN) and sends a
-notification when a check turns yellow (warn) or red (bad).  The thresholds are rules of thumb for spotting trouble
-early (a stalled RL, a starved rejection sampler, a missing effect); they are not results and change nothing.
-"""
 import json
 import statistics
 import time
@@ -59,9 +52,6 @@ def annotation(root):
 
 
 def structure(graph):
-    """Shape of one condition DAG: depth (longest depends_on chain), share of local conditions, share of attribute /
-    relation conditions that depend on something, and whether it degenerates (flat although it has structured nodes,
-    or a single chain)."""
     nodes = {n.get('node_id'): n for n in graph.get('nodes', []) if isinstance(n, dict)}
     deps = {i: [d for d in (n.get('depends_on') or []) if d in nodes and d != i] for i, n in nodes.items()}
     memo = {}
@@ -79,9 +69,6 @@ def structure(graph):
 
 
 def graph_structure(root):
-    """Degenerate graphs would erase what the DAG adds over a flat checklist (local verification, dependency-aware
-    repair): flag sources whose graphs are flat despite attributes/relations, mostly global, unlinked or chain-like.
-    Flat graphs of pure presence checklists (e.g. CoReBench multi-instance) are normal and not flagged."""
     by_source = {}
     for path in sorted((root / 'data' / 'processed' / 'graphs').glob('*.jsonl')):
         for row in rows(path):
@@ -257,7 +244,6 @@ def markdown(health):
 
 
 def refresh(root, runs, notifier=None):
-    """Recompute, write runs/HEALTH.md and runs/state/health.json, notify about checks that got worse."""
     runs = Path(runs)
     previous = {c['key']: c['status'] for c in (load(runs / 'state' / 'health.json') or {}).get('checks', [])}
     health = report(root, runs)

@@ -1,4 +1,3 @@
-"""Tiny absolute-path subsets of the prepared files for the first-hour smoke test / throughput calibration."""
 import json
 import sys
 from pathlib import Path

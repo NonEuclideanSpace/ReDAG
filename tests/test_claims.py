@@ -1,5 +1,3 @@
-"""Several machines, one pipeline: shared jobs are claimed atomically, NOT_BEFORE orders side jobs, and a scheduler
-waiting for another machine keeps running instead of ending as stalled (standard library only)."""
 import argparse
 import os
 import shutil
@@ -12,8 +10,8 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts' / 'launch'))
-import pipeline  # noqa: E402
-from orchestrator import Job, Scheduler  # noqa: E402
+import pipeline
+from orchestrator import Job, Scheduler
 
 PY = sys.executable
 
@@ -21,14 +19,13 @@ PY = sys.executable
 def test_local_claims_are_exclusive_and_releasable(tmp_path):
     a = pipeline.Claims(tmp_path / 'runs', me='machine-a')
     b = pipeline.Claims(tmp_path / 'runs', me='machine-b')
-    assert a.claim('canvases_shard0') and a.claim('canvases_shard0')   # idempotent for the owner (restarts)
+    assert a.claim('canvases_shard0') and a.claim('canvases_shard0')
     assert not b.claim('canvases_shard0') and b.owner('canvases_shard0') == 'machine-a'
     assert b.claim('canvases_shard1') and a.owner('canvases_shard1') == 'machine-b'
     assert a.release('canvases_shard0') and b.claim('canvases_shard0')
 
 
 def test_remote_claim_commands(tmp_path):
-    """The shell snippets sent over ssh, run locally: atomic claim, listing, release."""
     folder = tmp_path / 'claims host'
 
     class Local(pipeline.Claims):
@@ -52,14 +49,14 @@ def test_unreachable_claims_host_falls_back_after_a_while(tmp_path):
             return None
     c = Down(tmp_path / 'runs', host='root@peer:2222', me='machine-a', fallback_minutes=0.0005)
     c.cache = {'rs_part0': 'machine-b'}
-    assert not c.claim('rs_part1')            # first failure: do not start anything yet
+    assert not c.claim('rs_part1')
     time.sleep(0.05)
-    assert c.claim('rs_part1') and c.owner('rs_part0') is None   # still unreachable after the window: run anyway
+    assert c.claim('rs_part1') and c.owner('rs_part0') is None
 
 
 def clean_env(monkeypatch):
     for name in ('CLAIMS_HOST', 'LOCAL_JOBS', 'EXTERNAL_JOBS', 'SHARED_JOBS', 'NOT_BEFORE', 'HOLD', 'SYNC_PEER'):
-        monkeypatch.delenv(name, raising=False)  # a shell that sourced env.sh / local.env must not leak into the test
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_shared_jobs_and_not_before_wiring(tmp_path, monkeypatch):
@@ -73,8 +70,8 @@ def test_shared_jobs_and_not_before_wiring(tmp_path, monkeypatch):
     scheduler, jobs, _, _ = pipeline.make_scheduler(argparse.Namespace(), s, quiet=True)
     by_name = {j.name: j for j in jobs}
     claims_dir = Path(s['RUNS']) / 'state' / 'claims'
-    assert by_name['annotate_shard3'].ready()                  # shared wins over EXTERNAL_JOBS
-    assert not by_name['sft_editor'].ready()                   # still external
+    assert by_name['annotate_shard3'].ready()
+    assert not by_name['sft_editor'].ready()
     claims_dir.mkdir(parents=True)
     (claims_dir / 'canvases_shard2').write_text('other-machine')
     assert not by_name['canvases_shard2'].ready() and 'claimed by other-machine' in by_name['canvases_shard2'].waiting_for
@@ -96,8 +93,8 @@ def test_scheduler_skips_jobs_claimed_elsewhere_and_waits_for_other_machines(tmp
     thread = threading.Thread(target=lambda: result.update(outcome=scheduler.run()))
     thread.start()
     time.sleep(1.0)
-    assert thread.is_alive()                  # waits for the condition instead of ending as stalled
-    (tmp_path / 'runs' / 'logs' / 'theirs.done').write_text('')   # what the sync brings from the other machine
+    assert thread.is_alive()
+    (tmp_path / 'runs' / 'logs' / 'theirs.done').write_text('')
     flag.write_text('1')
     thread.join(30)
     assert result['outcome'] == 'complete' and started.read_text() == 'mine '

@@ -34,7 +34,7 @@ def test_batched_cfg_matches_two_forwards_including_gradients():
     b.sum().backward()
     assert torch.allclose(plain.weight.grad, fused.weight.grad)
     mismatched = predict_cfg_velocity(TwoInput(True), z, src, text, torch.zeros(1, 2, 3), t)
-    assert mismatched.shape == z.shape  # falls back to two forwards when text lengths differ
+    assert mismatched.shape == z.shape
 
 
 def test_reduced_step_schedules_keep_four_strata():

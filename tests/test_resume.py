@@ -1,4 +1,3 @@
-"""Interrupted runs must end exactly like uninterrupted ones (SFT, alternating RL, evaluation sessions)."""
 import json
 import sys
 from pathlib import Path
@@ -17,9 +16,7 @@ from redag.verify.verifier import TwoStageVerifier
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 
 
-# ----------------------------------------------------------------------------------------------- SFT
 class TinyLM:
-    """Planner/Controller SFT interface around one LoRA-like matrix."""
 
     def __init__(self):
         generator = torch.Generator().manual_seed(0)
@@ -65,9 +62,9 @@ def test_sft_resume_matches_uninterrupted_run(tmp_path):
     rows = lambda name: (tmp_path / name / 'metrics.jsonl').read_text().splitlines()
     assert rows('cut') == rows('clean') and len(rows('clean')) == 8
     assert not (tmp_path / 'cut' / 'resume').exists()
-    again = TinyLM()  # a finished run returns at once
+    again = TinyLM()
     assert train_sft(again, records, tmp_path / 'cut', 'controller', epochs=2, batch_size=2, learning_rate=0.05) == expected
-    with pytest.raises(ValueError):  # a checkpoint from other settings is refused
+    with pytest.raises(ValueError):
         with pytest.raises(checkpoint.Interrupted):
             train_sft(TinyLM(), records, tmp_path / 'other', 'controller', epochs=2, batch_size=2, learning_rate=0.05, interrupt_after=1)
         train_sft(TinyLM(), records, tmp_path / 'other', 'controller', epochs=3, batch_size=2, learning_rate=0.05)
@@ -76,7 +73,7 @@ def test_sft_resume_matches_uninterrupted_run(tmp_path):
 def test_checkpoint_survives_crash_between_renames(tmp_path):
     checkpoint.save(tmp_path, {'step': 1}, tensors={'m': {'w': torch.ones(2)}})
     checkpoint.save(tmp_path, {'step': 2}, tensors={'m': {'w': torch.full((2,), 2.0)}})
-    (tmp_path / 'resume').rename(tmp_path / 'resume.tmp')  # as if the process died before the final rename
+    (tmp_path / 'resume').rename(tmp_path / 'resume.tmp')
     state, payload = checkpoint.load(tmp_path)
     assert state['step'] == 2 and torch.equal(payload['tensors']['m']['w'], torch.full((2,), 2.0))
     assert checkpoint.keep_jsonl_rows(tmp_path / 'missing.jsonl', lambda row: True) == []
@@ -86,7 +83,6 @@ def test_checkpoint_survives_crash_between_renames(tmp_path):
     assert log.read_text() == '{"step": 0}\n{"step": 1}\n'
 
 
-# ----------------------------------------------------------------------------------------------- RL
 class FakeAdapter:
     def __init__(self, value):
         self.weight = torch.nn.Parameter(torch.full((3,), value))
@@ -166,7 +162,7 @@ def test_alternating_rl_resume_matches_uninterrupted_run(tmp_path, monkeypatch):
     monkeypatch.setattr(rl_trainer, 'evaluate_rl_development', fake_development)
     clean_history, clean_ctrl, clean_edit = rl_run(tmp_path / 'clean')
     assert len(clean_history) == 8 and [r['step'] for r in clean_history] == list(range(8))
-    for cut in (1, 2, 5):  # inside a stage, at a stage boundary, in round two
+    for cut in (1, 2, 5):
         out = tmp_path / f'cut{cut}'
         with pytest.raises(checkpoint.Interrupted):
             rl_run(out, interrupt_after=cut)
@@ -179,11 +175,10 @@ def test_alternating_rl_resume_matches_uninterrupted_run(tmp_path, monkeypatch):
                                torch.load(tmp_path / 'clean' / stage / 'controller' / 'adapter.pt')['lora_w']), (cut, stage)
         assert (out / 'stage_checkpoints.json').read_text() == (tmp_path / 'clean' / 'stage_checkpoints.json').read_text()
         assert (out / 'rl_complete.json').exists() and not (out / 'resume').exists()
-    finished, _, _ = rl_run(tmp_path / 'clean')  # complete runs return their history without training
+    finished, _, _ = rl_run(tmp_path / 'clean')
     assert comparable(finished) == comparable(clean_history)
 
 
-# ----------------------------------------------------------------------------------------------- evaluation
 def eval_main(monkeypatch, tmp_path, argv, fail_after=None):
     import run_eval_benchmarks as reb
     calls = {'n': 0}
@@ -218,19 +213,18 @@ def test_evaluation_resumes_per_session(tmp_path, monkeypatch):
     assert eval_main(monkeypatch, tmp_path, base + ['--output', tmp_path / 'clean.json']) == 6
     with pytest.raises(RuntimeError):
         eval_main(monkeypatch, tmp_path, base + ['--output', tmp_path / 'cut.json'], fail_after=4)
-    assert eval_main(monkeypatch, tmp_path, base + ['--output', tmp_path / 'cut.json']) == 2  # only the missing sessions
+    assert eval_main(monkeypatch, tmp_path, base + ['--output', tmp_path / 'cut.json']) == 2
     clean, cut = (json.loads((tmp_path / f'{n}.json').read_text()) for n in ('clean', 'cut'))
     assert [c['id'] for c in cut['evaluation_cases']] == [c['id'] for c in clean['evaluation_cases']]
     assert [c['group'] for c in cut['evaluation_cases']] == [c['group'] for c in clean['evaluation_cases']]
-    with pytest.raises(ValueError):  # the cache of one setting is never mixed into another
+    with pytest.raises(ValueError):
         eval_main(monkeypatch, tmp_path, base[:-1] + [99, '--output', tmp_path / 'cut.json'])
-    # experiment 3 parts only need the stages they run (pre-RL stage file)
     stages = tmp_path / 'stages.json'
     stages.write_text(json.dumps({'zero_shot': {'controller': None, 'editor': None}}))
     exp3 = ['--exp_id', 3, '--data', data, '--allow-small-dataset', '--stage_checkpoints', stages, '--stages', 'zero_shot',
             '--shard', 0, '--num_shards', 2, '--max_steps', 2, '--generation_budget', 3, '--verification_budget', 50,
             '--output', tmp_path / 'exp3_zero_shot.s0.json']
-    assert eval_main(monkeypatch, tmp_path, exp3) == 2 * 3  # records 0 and 2, three seeds
+    assert eval_main(monkeypatch, tmp_path, exp3) == 2 * 3
     part = json.loads((tmp_path / 'exp3_zero_shot.s0.json').read_text())
     assert set(part['final_views']) == {'0:0', '0:1', '0:2', '2:0', '2:1', '2:2'}
 
@@ -253,13 +247,12 @@ def test_experiment3_sft_stage_reuses_experiment1_sessions(tmp_path, monkeypatch
                                   'sft': {'controller': '../sft/controller', 'editor': '../sft/editor'}}))
     exp3 = ['--exp_id', 3, '--stage_checkpoints', stages, '--stages', 'sft', '--output', tmp_path / 'eval' / 'exp3_sft.s0.json',
             '--reuse_cases', tmp_path / 'eval' / 'exp1.s0.cases.jsonl']
-    assert eval_main(monkeypatch, tmp_path, common + exp3) == 3 * 2  # seeds 1 and 2 only; seed 0 comes from experiment 1
+    assert eval_main(monkeypatch, tmp_path, common + exp3) == 3 * 2
     part = json.loads((tmp_path / 'eval' / 'exp3_sft.s0.json').read_text())
     assert len(part['evaluation_cases']) == 9 and all(c['group'].startswith('sft/redag_full/') for c in part['evaluation_cases'])
     assert all(c['id'].startswith('case_s0_sft_') for c in part['evaluation_cases'])
     exp1_cases = {c['id'] for c in json.loads((tmp_path / 'eval' / 'exp1.s0.json').read_text())['evaluation_cases']}
     assert set(part['final_views']) == {f'{i}:{s}' for i in range(3) for s in range(3)} and exp1_cases
-    # other budgets: nothing is reused
     other = [a if a != 50 else 60 for a in common]
     assert eval_main(monkeypatch, tmp_path, other + exp3[:-4] + ['--output', tmp_path / 'eval' / 'exp3_other.s0.json',
                                                                  '--reuse_cases', tmp_path / 'eval' / 'exp1.s0.cases.jsonl']) == 9

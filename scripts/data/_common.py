@@ -1,10 +1,3 @@
-"""Shared helpers for the ReDAG data pipeline.
-
-Everything here is CPU-only and streams data so it stays inside the 2 GiB / 0.5-core
-limits of AutoDL's no-GPU mode.  Graph validation reuses the repository's own
-ConditionDAG / preserve_previous_conditions so prepared files match what the
-training and evaluation scripts accept.
-"""
 import hashlib
 import json
 import os
@@ -41,7 +34,6 @@ def read_jsonl(path):
 
 
 def write_jsonl(path, rows):
-    """Atomic write: readers never see a half-written file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + '.tmp')
@@ -61,7 +53,6 @@ def append_jsonl(path, row):
 
 
 def done_ids(path, key='id'):
-    """IDs already present in an (append-only) output file, for resumable jobs."""
     path = Path(path)
     if not path.exists():
         return set()
@@ -71,12 +62,11 @@ def done_ids(path, key='id'):
             try:
                 ids.add(json.loads(line)[key])
             except (ValueError, KeyError, TypeError):
-                continue  # tolerate a truncated last line after a crash
+                continue
     return ids
 
 
 def stable_unit(key, salt='redag-v2'):
-    """Deterministic pseudo-random number in [0, 1) used for reproducible splits."""
     digest = hashlib.sha1(f'{salt}:{key}'.encode()).hexdigest()
     return int(digest[:12], 16) / float(16 ** 12)
 
@@ -86,7 +76,6 @@ def relpath(path, start):
 
 
 def bbox_of(mask_rows_cols):
-    """Normalized [x1, y1, x2, y2] of the True pixels of a 2D boolean numpy array."""
     import numpy as np
     ys, xs = np.nonzero(mask_rows_cols)
     if len(xs) == 0:
@@ -96,7 +85,6 @@ def bbox_of(mask_rows_cols):
 
 
 def expand_box(box, scale=1.25, min_side=0.25):
-    """Enlarge a normalized box around its center; keeps it inside [0, 1]."""
     cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
     half_w = max((box[2] - box[0]) * scale, min_side) / 2
     half_h = max((box[3] - box[1]) * scale, min_side) / 2
@@ -105,15 +93,12 @@ def expand_box(box, scale=1.25, min_side=0.25):
     return [round(x1, 6), round(y1, 6), round(x2, 6), round(y2, 6)]
 
 
-# ----------------------------------------------------------------------------- graphs
-
 def _question(text):
     text = re.sub(r'\s+', ' ', str(text or '')).strip()
     return text if not text or text.endswith('?') else text + '?'
 
 
 def clean_node(raw, default_scope='unknown'):
-    """Coerce a loosely formatted node dict into ConditionNode keyword arguments."""
     node_type = str(raw.get('node_type', 'attribute')).strip().lower()
     node_type = node_type if node_type in NODE_TYPES else 'attribute'
     scope = str(raw.get('scope', default_scope)).strip().lower()
@@ -152,7 +137,6 @@ def parents_of(nodes, comp=(), supp=()):
 
 
 def _reaches(parents, start, goal):
-    """True when `goal` is an ancestor-or-self of `start` following parent links."""
     stack, seen = [start], set()
     while stack:
         cur = stack.pop()
@@ -166,10 +150,6 @@ def _reaches(parents, start, goal):
 
 
 def sanitize_graph(nodes, comp=(), supp=(), inter=()):
-    """Drop dangling/self/duplicate references and any dependency that would close a cycle.
-
-    `nodes` is an ordered dict node_id -> cleaned node.  Returns (graph_dict, dropped_count).
-    """
     dropped = 0
     ids = set(nodes)
     parents = {nid: set() for nid in nodes}
@@ -212,7 +192,6 @@ def sanitize_graph(nodes, comp=(), supp=(), inter=()):
 
 
 def tighten_scopes(graph):
-    """Downgrade 'local' claims the harness could not support (see redag.graph.dag.semantic_support)."""
     nodes = {n['node_id']: n for n in graph['nodes']}
     parents = parents_of(nodes, graph['comp_edges'], graph['supp_edges'])
     for nid, node in nodes.items():
@@ -230,13 +209,11 @@ def tighten_scopes(graph):
 
 
 def build_dag(graph, previous=None, superseded=()):
-    """Validate with the repository's own code path; raises ValueError/TypeError on bad graphs."""
     from redag.models.planner import preserve_previous_conditions
     return preserve_previous_conditions(graph, previous, list(superseded))
 
 
 def topo_order(nodes, comp=(), supp=()):
-    """Stable topological order (dependencies first, otherwise original order)."""
     parents = parents_of(nodes, comp, supp)
     order, placed = [], set()
     pending = list(nodes)

@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Launch script for ReDAG next-stage experiments (preserve all old artifacts).
-# Usage:
-#   bash scripts/launch_next_stage.sh <task> [gpu_id] [shard_or_baseline] [num_shards_or_shards_csv]
 
 TASK="${1:-help}"
 GPU="${2:-0}"

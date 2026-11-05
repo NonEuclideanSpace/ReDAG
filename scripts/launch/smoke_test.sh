@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# First GPU hour: run every GPU stage end-to-end on a handful of records (~30-45 min) to catch
-# model/API/memory problems and to measure real per-step costs before the long jobs start.
-# Timings land in runs/smoke/logs/timings.jsonl; scripts/launch/README.md explains how to extrapolate.
 RUNS=${RUNS:-/root/autodl-tmp/ReDAG/runs}/smoke
 source "$(dirname "$0")/env.sh"
 require_gpus 2 || exit 1

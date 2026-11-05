@@ -1,12 +1,3 @@
-"""Held-out check of the editor SFT (GPU, a few minutes).
-
-The SFT training loss of a flow-matching model is dominated by the randomly drawn noise level, so its running mean says
-little.  Here the masked flow-matching loss of the SFT objective is measured on editor_sft_dev (MagicBrush dev, never
-trained on) at fixed noise levels, with the same noise for the editor with and without the LoRA adapter.  A lower loss
-with the adapter means it predicts the MagicBrush edits better than the base editor.
-
-  python scripts/eval_editor_sft.py --data data/final/editor_sft_dev.jsonl --adapter runs/sft/editor --output runs/eval/editor_sft_dev.json
-"""
 import argparse
 import json
 import statistics
@@ -15,16 +6,15 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import torch  # noqa: E402
+import torch
 
-from redag.config import ReDAGConfig  # noqa: E402
-from redag.learn.sft_trainer import read_records  # noqa: E402
-from redag.models.editor import FluxEditor  # noqa: E402
-from redag.verify.grounder import load_image  # noqa: E402
+from redag.config import ReDAGConfig
+from redag.learn.sft_trainer import read_records
+from redag.models.editor import FluxEditor
+from redag.verify.grounder import load_image
 
 
 def masked_flow_loss(dit_model, z_src, z_0, text_embeds, mask_latent, t, epsilon, alpha_mask):
-    """compute_editor_masked_flow_sft_loss at a given noise level t and noise epsilon (instead of random ones)."""
     batch, channels = z_0.shape[:2]
     timesteps = torch.full((batch,), t, device=z_0.device, dtype=z_0.dtype)
     z_t = (1.0 - t) * z_0 + t * epsilon

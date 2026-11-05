@@ -1,21 +1,3 @@
-"""GPU-aware job scheduler (standard library only).  scripts/launch/pipeline.py defines the ReDAG jobs.
-
-Jobs form a DAG and need 0 (CPU), 1 or more GPUs.  Whenever GPUs are free, the scheduler starts the ready job with the
-longest remaining critical path, pinned to its GPUs through CUDA_VISIBLE_DEVICES, so no GPU waits for a phase
-boundary.  A ready job that needs more GPUs than are free gets a reservation (EASY backfilling): smaller jobs may use
-the waiting GPUs only if they are expected to finish before it can start.
-
-All state is on disk, so the scheduler can be stopped, killed or restarted at any time:
-  runs/logs/<job>.done              finished; holds the job's stamp (same marker as env.sh run_job)
-  runs/logs/<job>.log               job output, appended per attempt
-  runs/logs/timings.jsonl           one row per finished attempt
-  runs/state/jobs/<job>.lock        flock held while the job runs; a restarted scheduler adopts running jobs
-  runs/state/jobs/<job>.json        the attempt being run (command, GPUs, start time, process group)
-  runs/state/jobs/<job>.exit        exit status of the last attempt
-  runs/state/jobs/<job>.failed      attempts exhausted (retried automatically after a code change, or with --retry-failed)
-  runs/state/jobs/<job>.progress    progress written by the job itself (redag/progress.py)
-  runs/state/status.json            snapshot for `status` and external monitors
-"""
 import fcntl
 import json
 import math
@@ -34,17 +16,17 @@ HOUR = 3600.0
 @dataclass
 class Job:
     name: str
-    cmd: object                     # argv list, or a string run with bash -c
+    cmd: object
     gpus: int = 0
     deps: tuple = ()
-    hours: float = 0.1              # estimated wall hours (A800); refined from finished siblings and progress
-    group: str = ''                 # phase label for display
-    family: str = ''                # shards of one job share a family: finished ones calibrate the others
-    ready: object = None            # callable -> bool: extra condition, e.g. a checkpoint written by a running job
-    waiting_for: str = ''           # shown while `ready` is false
-    soft: tuple = ()                # ((job, fraction), ...): planning only, ready after that share of the job
+    hours: float = 0.1
+    group: str = ''
+    family: str = ''
+    ready: object = None
+    waiting_for: str = ''
+    soft: tuple = ()
     attempts: int = 2
-    stamp: str = ''                 # a .done marker holding another stamp does not count
+    stamp: str = ''
     env: dict = field(default_factory=dict)
 
 
@@ -63,7 +45,6 @@ def read_json(path, default=None):
 
 
 def lock_held(path):
-    """True if another process holds an flock on path (checked without blocking)."""
     try:
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     except OSError:
@@ -78,7 +59,6 @@ def lock_held(path):
 
 
 def query_gpus():
-    """[{index, name, used, total}] from nvidia-smi (MiB), or [] without GPUs."""
     try:
         out = subprocess.run(['nvidia-smi', '--query-gpu=index,name,memory.used,memory.total', '--format=csv,noheader,nounits'],
                              capture_output=True, text=True, timeout=20)
@@ -121,11 +101,10 @@ def validate(jobs):
     by_name = {j.name: j for j in jobs}
     for job in jobs:
         visit(job.name, [])
-    return order  # dependencies first
+    return order
 
 
 def bottom_levels(jobs, hours):
-    """Longest estimated path (hours) from the start of each job to the end of the pipeline."""
     children = {j.name: [] for j in jobs}
     for job in jobs:
         for dep in job.deps:
@@ -140,9 +119,6 @@ def bottom_levels(jobs, hours):
 
 
 def reservation(need, free, running, start=0.0):
-    """Earliest time >= start at which `need` GPUs are free, and the spare GPUs at that time.
-
-    running: [(expected_end, gpus)] of jobs holding GPUs now; free: GPUs free now."""
     points = sorted({start, *[end for end, _ in running if end > start]})
     for t in points:
         available = free + sum(g for end, g in running if end <= t)
@@ -152,12 +128,6 @@ def reservation(need, free, running, start=0.0):
 
 
 def choose(ready, free, running, now, cpu_free, upcoming=None):
-    """Pick the jobs to start now.
-
-    ready: [(job, est_seconds, priority)] sorted by priority, highest first; free: free GPU count; running: [(end, gpus)]
-    of jobs holding GPUs; upcoming: optional (job, ready_at, priority) of a multi-GPU job that becomes ready soon,
-    passed only when the critical path binds.  A job that cannot start gets a reservation: lower-priority jobs then
-    start only if they end before it can start, or if enough GPUs remain for it."""
     starts, held, running = [], None, list(running)
     if upcoming is not None:
         job, ready_at, priority = upcoming
@@ -177,9 +147,9 @@ def choose(ready, free, running, now, cpu_free, upcoming=None):
         end = now + est
         if held is not None and priority <= held['priority']:
             if end <= held['time']:
-                pass  # finishes before the reserved job can start
+                pass
             elif held['spare'] >= job.gpus:
-                held['spare'] -= job.gpus  # enough GPUs stay free for the reserved job
+                held['spare'] -= job.gpus
             else:
                 continue
         starts.append(job)
@@ -189,9 +159,6 @@ def choose(ready, free, running, now, cpu_free, upcoming=None):
 
 
 def simulate(jobs, est, gpus, done=(), running=(), now=0.0, cpu_slots=2, progress=None):
-    """List-schedule the remaining jobs with `choose`; returns {job: (start, end)} in seconds from now.
-
-    running: [(name, remaining_seconds, gpus)].  Readiness conditions are modelled by `soft` fractions."""
     by_name = {j.name: j for j in jobs}
     done = set(done)
     level = bottom_levels(jobs, {n: est[n] / HOUR for n in by_name})
@@ -228,8 +195,7 @@ def simulate(jobs, est, gpus, done=(), running=(), now=0.0, cpu_slots=2, progres
             timeline[job.name] = (t, t + est[job.name])
             pending.remove(job)
         if not active:
-            break  # nothing can run (needs more GPUs than available, or an impossible dependency)
-        # advance to the next event: a job ends, or a soft dependency's threshold passes
+            break
         events = [end for end, _ in active.values()]
         for job in pending:
             for dep, fraction in job.soft:
@@ -246,7 +212,6 @@ def simulate(jobs, est, gpus, done=(), running=(), now=0.0, cpu_slots=2, progres
 
 
 class Notifier:
-    """Webhook messages (NOTIFY_URL): ServerChan, PushPlus, Feishu, DingTalk, WeCom, Bark, ntfy, or generic JSON."""
 
     def __init__(self, url=None, prefix='ReDAG', log=print):
         self.url, self.prefix, self.log = (url or '').strip(), prefix, log
@@ -287,16 +252,12 @@ class Notifier:
             with urllib.request.urlopen(urllib.request.Request(url, data=data, headers=headers), timeout=15) as response:
                 response.read()
             return True
-        except Exception as error:  # notifications must never stop the pipeline
+        except Exception as error:
             self.log(f'notification failed: {error}')
             return False
 
 
 def execute(spec_path):
-    """Run one job attempt (called as `orchestrator.py _exec <spec>` in its own session).
-
-    Holds the job lock for the whole attempt (the child inherits the locked descriptor, so the lock stays held even if
-    this wrapper dies), appends to the job log, then records the exit status, the timing row and the .done marker."""
     spec = json.loads(Path(spec_path).read_text(encoding='utf-8'))
     lock = os.open(spec['lock'], os.O_RDWR | os.O_CREAT, 0o644)
     for _ in range(100):
@@ -306,10 +267,10 @@ def execute(spec_path):
         except BlockingIOError:
             time.sleep(0.1)
     else:
-        return 75  # another process runs this job
+        return 75
     stop = []
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, lambda signum, frame: stop.append(signum))  # the child gets the same signal (process group)
+        signal.signal(sig, lambda signum, frame: stop.append(signum))
     env = dict(os.environ, **spec['env'])
     cmd = spec['cmd'] if isinstance(spec['cmd'], list) else ['bash', '-c', spec['cmd']]
     started = time.time()
@@ -347,22 +308,21 @@ class Scheduler:
         self.jobdir = self.state / 'jobs'
         for folder in (self.logs, self.jobdir):
             folder.mkdir(parents=True, exist_ok=True)
-        self.fixed_gpus = gpus  # None: detect with nvidia-smi
+        self.fixed_gpus = gpus
         self.cpu_slots, self.poll, self.gpu_free_mib = cpu_slots, poll, gpu_free_mib
         self.notifier = notifier or Notifier()
         self.code_version, self.retry_failed, self.max_hours = code_version, retry_failed, max_hours
-        self.running = {}   # name -> {proc, gpus, started, attempt, adopted}
-        self.attempts = {}  # name -> attempts used by this scheduler
-        self.retry_at = {}  # name -> earliest time of the next attempt
+        self.running = {}
+        self.attempts = {}
+        self.retry_at = {}
         self.events = []
         self.stopping = False
         self.retry_delay = 60.0
-        self.tick, self.tick_every, self.last_tick = tick, tick_every, 0.0  # e.g. the health report
-        self.claim = claim  # name -> bool, asked right before a start (jobs shared with other machines; None: always run)
+        self.tick, self.tick_every, self.last_tick = tick, tick_every, 0.0
+        self.claim = claim
         self.log = log or (lambda text: print(time.strftime('[%F %T] ') + text, flush=True))
         self.gpu_info, self.foreign = [], set()
 
-    # ---------------------------------------------------------------- paths and on-disk state
     def path(self, name, suffix):
         return self.jobdir / f'{name}.{suffix}'
 
@@ -384,7 +344,7 @@ class Scheduler:
         if not info:
             return False
         if self.retry_failed or info.get('code') != self.code_version:
-            return False  # code changed since (or explicit retry): try again
+            return False
         return True
 
     def gpu_list(self):
@@ -404,9 +364,7 @@ class Scheduler:
         busy = {g['index'] for g in self.gpu_info if self.gpu_free_mib is not None and g['used'] > self.gpu_free_mib}
         return [g for g in self.gpu_list() if g not in held and g not in busy]
 
-    # ---------------------------------------------------------------- estimates
     def estimates(self, now=None):
-        """Seconds each job is expected to take in total (running jobs: their expected total)."""
         now = now or time.time()
         measured = {}
         for row in read_jsonl(self.logs / 'timings.jsonl'):
@@ -421,7 +379,7 @@ class Scheduler:
         for name, job in self.jobs.items():
             if name in measured:
                 est[name] = max(measured[name], 1.0)
-            elif job.family in family_runs:  # scale by finished siblings: actual / estimated
+            elif job.family in family_runs:
                 ratios = sorted(s / max(h * HOUR, 1.0) for s, h in family_runs[job.family])
                 est[name] = job.hours * HOUR * ratios[len(ratios) // 2]
             else:
@@ -434,7 +392,6 @@ class Scheduler:
         return read_json(self.path(name, 'progress'))
 
     def remaining(self, name, now, total_est):
-        """Expected seconds left for a running job: from its progress rate when available, else from the estimate."""
         info = self.running[name]
         elapsed = now - info['started']
         prog = self.progress(name)
@@ -450,14 +407,12 @@ class Scheduler:
                 return max(elapsed * (total - done_now) / done_now, 30.0)
         return max(total_est - elapsed, 60.0)
 
-    # ---------------------------------------------------------------- job lifecycle
     def adopt(self):
-        """Jobs still running from an earlier scheduler (their lock is held) are tracked, not restarted."""
         for name in self.order:
             if name in self.running or self.is_done(name):
                 continue
             if not lock_held(self.path(name, 'lock')):
-                self.path(name, 'restart').unlink(missing_ok=True)  # stale request for a job that is not running
+                self.path(name, 'restart').unlink(missing_ok=True)
                 continue
             spec = read_json(self.path(name, 'json'), {})
             self.running[name] = dict(proc=None, gpus=spec.get('gpu_ids', []), started=spec.get('started', time.time()),
@@ -476,7 +431,7 @@ class Scheduler:
         if job.gpus:
             env['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, gpus))
         elif self.gpu_list():
-            env['CUDA_VISIBLE_DEVICES'] = ''  # CPU jobs must not grab a GPU
+            env['CUDA_VISIBLE_DEVICES'] = ''
         spec = dict(name=name, cmd=job.cmd, env=env, cwd=self.cwd, attempt=attempt, gpu_ids=list(gpus), gpus=','.join(map(str, gpus)),
                     stamp=job.stamp, lock=str(self.path(name, 'lock')), exit=str(self.path(name, 'exit')),
                     done=str(self.done_marker(name)), log=str(self.logs / f'{name}.log'),
@@ -510,7 +465,7 @@ class Scheduler:
             if self.stopping:
                 self.log(f'stopped {name}; it resumes from its last checkpoint on the next run')
                 continue
-            if self.path(name, 'restart').exists():  # `pipeline.py restart`: new code for a running job, not a failure
+            if self.path(name, 'restart').exists():
                 self.path(name, 'restart').unlink(missing_ok=True)
                 self.attempts[name] = max(0, self.attempts.get(name, 1) - 1)
                 self.retry_at.pop(name, None)
@@ -528,9 +483,7 @@ class Scheduler:
                 self.events.append(('failed', name))
                 self.notifier.send(f'job failed: {name}', f'{reason} after {minutes:.0f} min\n{tail[-1500:]}')
 
-    # ---------------------------------------------------------------- scheduling
     def classify(self, now=None):
-        """{name: state} with state in done/running/failed/blocked/waiting/ready/held."""
         now = now or time.time()
         states = {}
         for name in self.order:
@@ -548,7 +501,7 @@ class Scheduler:
             elif job.ready is not None and not safe_call(job.ready):
                 states[name] = 'held'
             elif job.gpus > len(self.gpu_list()):
-                states[name] = 'held'  # needs more GPUs than this machine has
+                states[name] = 'held'
             elif now < self.retry_at.get(name, 0):
                 states[name] = 'held'
             else:
@@ -556,8 +509,6 @@ class Scheduler:
         return states
 
     def held_by_condition(self, name):
-        """Held by a condition that can change from outside (another machine's job, a claim, a decision gate, an RL
-        checkpoint): keep waiting for it instead of ending as stalled.  Not on a machine that could never run the job."""
         job = self.jobs[name]
         return job.ready is not None and job.gpus <= len(self.gpu_list()) and not safe_call(job.ready)
 
@@ -583,7 +534,6 @@ class Scheduler:
             self.launch(job.name, take)
 
     def upcoming(self, states, est, level, now):
-        """When the critical path binds (many GPUs), reserve GPUs for the next critical multi-GPU job before it is ready."""
         gpus = len(self.gpu_list())
         if gpus < 2:
             return None
@@ -605,7 +555,6 @@ class Scheduler:
                 best = (job, ready_at, level[name])
         return best
 
-    # ---------------------------------------------------------------- status
     def status(self, states=None, est=None, now=None):
         now = now or time.time()
         states = states or self.classify(now)
@@ -660,7 +609,6 @@ class Scheduler:
         except OSError as error:
             self.log(f'cannot write status: {error}')
 
-    # ---------------------------------------------------------------- main loop
     def control(self):
         value = (self.state / 'control').read_text().strip() if (self.state / 'control').exists() else ''
         return value
@@ -697,7 +645,7 @@ class Scheduler:
         (self.state / 'control').unlink(missing_ok=True)
         self.refresh_gpus()
         self.adopt()
-        for name in list(self.running):  # jobs started before sharing was configured: record that they run here
+        for name in list(self.running):
             if self.claim is not None and not self.claim(name):
                 self.log(f'WARNING: {name} runs here but another machine claimed it')
         started = time.time()
@@ -738,7 +686,7 @@ class Scheduler:
                 self.last_tick = now
                 try:
                     self.tick()
-                except Exception as error:  # a broken report must never stop the pipeline
+                except Exception as error:
                     self.log(f'periodic hook failed: {error!r}')
             if not self.running:
                 if all(v == 'done' for v in states.values()):
@@ -749,7 +697,7 @@ class Scheduler:
                     break
                 if not any(v == 'ready' or (v == 'held' and (self.retry_at.get(n, 0) > now or self.held_by_condition(n)))
                            for n, v in states.items()):
-                    outcome = 'stalled'  # only failed / blocked jobs, or jobs this machine cannot run, are left
+                    outcome = 'stalled'
                     break
             time.sleep(self.poll)
         states = self.classify()
@@ -769,7 +717,7 @@ class Scheduler:
         return outcome
 
 
-MILESTONES = {}  # job name -> message sent when it finishes (filled by pipeline.py)
+MILESTONES = {}
 
 
 def safe_call(fn):

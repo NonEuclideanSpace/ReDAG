@@ -1,13 +1,3 @@
-"""Download the six model checkpoints from ModelScope (fast inside China) into the Hugging Face cache layout.
-
-  $HF_HOME/hub/models--<org>--<name>/snapshots/<sha>/...   the files
-  $MODELS/<org>/<name> -> that snapshot                      what scripts/launch/env.sh points to
-
-Resumable: complete files are skipped, partial ones (*.incomplete) continue with HTTP range requests, so the same
-command can be rerun after any interruption (or on a cloned instance).  --check only verifies (sizes and that every
-shard named in a *.safetensors.index.json exists).  ~120 GiB in total.
-  python scripts/launch/download_models.py [--models Qwen/Qwen3.5-9B ...] [--workers 16] [--check]
-"""
 import argparse
 import json
 import os
@@ -19,7 +9,6 @@ from pathlib import Path
 
 MODELS = ['IDEA-Research/grounding-dino-base', 'facebook/sam2.1-hiera-large', 'Qwen/Qwen3-VL-8B-Instruct', 'Qwen/Qwen3.5-9B',
           'black-forest-labs/FLUX.2-klein-base-9B', 'Qwen/Qwen3.8-27B']
-# duplicates of the safetensors weights and sample images that nothing loads
 SKIP_NAMES = {'.gitattributes', 'LICENSE', 'LICENSE.md', 'README.md', 'editing.jpg', 'others.jpg', 'realism.jpg',
               'flux-2-klein-base-9b.safetensors', 'pytorch_model.bin', 'sam2.1_hiera_large.pt'}
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
@@ -38,7 +27,6 @@ def get_json(url, attempts=6):
 
 
 def snapshot_dir(hub, repo_id):
-    """Snapshot folder named after the Hugging Face commit (via hf-mirror) so the cache layout matches the hub's."""
     folder = hub / ('models--' + repo_id.replace('/', '--'))
     ref = folder / 'refs' / 'main'
     if ref.exists():

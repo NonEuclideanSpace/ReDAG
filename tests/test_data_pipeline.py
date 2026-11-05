@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts' / 'data'))
-from annotate_graphs import heuristic, to_graph  # noqa: E402
-from build_sets import failure_state, merged, planner_pairs, select_exact, session_turns, table  # noqa: E402
-from redag.models.planner import preserve_previous_conditions  # noqa: E402
+from annotate_graphs import heuristic, to_graph
+from build_sets import failure_state, merged, planner_pairs, select_exact, session_turns, table
+from redag.models.planner import preserve_previous_conditions
 
 CHECKLIST = {'id': 'cb:C-MR-001', 'kind': 't2i', 'prompt': 'A chef in a kitchen.', 'checklist': [
     {'qid': 'q01', 'question': 'If the chef and the hat are present, is the chef wearing the hat?', 'tags': ['relation'], 'fixed': True},
@@ -43,19 +43,18 @@ def test_checklist_answer_keeps_questions_and_adds_entities():
     nodes = {n['node_id']: n for n in graph['nodes']}
     assert nodes['q01']['question'] == CHECKLIST['checklist'][0]['question'] and nodes['q01']['scope'] == 'local'
     with pytest.raises(ValueError):
-        to_graph({'nodes': value['nodes'][1:]}, CHECKLIST, 'checklist')  # q01 missing
+        to_graph({'nodes': value['nodes'][1:]}, CHECKLIST, 'checklist')
 
 
 def test_checklist_answer_with_the_models_own_nodes_is_salvaged():
-    # the model adds a relation node r1 and an object node o1 (wrong id) next to the checklist items
     value = {'nodes': [node('q01', 'relation', 'x?', 'chef', ['r1']), node('r1', 'relation', 'Is the chef near the hat?', 'chef', ['o1', 'e2']),
                        node('o1', 'entity', 'Is there a chef?', 'chef'), node('e2', 'entity', 'Is there a hat?', 'hat'),
                        node('q02', 'entity', 'x?', 'knife'), node('q03', 'attribute', 'y?', 'knife', ['q02'])],
              'comp_edges': [['o1', 'q01'], ['e2', 'r1'], ['q02', 'q03']]}
     graph, _, _, _, warnings = to_graph(value, CHECKLIST, 'checklist')
     nodes = {n['node_id']: n for n in graph['nodes']}
-    assert set(nodes) == {'q01', 'q02', 'q03', 'e2', 'e3'}                 # r1 dropped, o1 renamed to the next free e<k>
-    assert sorted(nodes['q01']['depends_on']) == ['e2', 'e3']             # inherited r1's dependencies
+    assert set(nodes) == {'q01', 'q02', 'q03', 'e2', 'e3'}
+    assert sorted(nodes['q01']['depends_on']) == ['e2', 'e3']
     assert ['e3', 'q01'] in graph['comp_edges'] and not any('r1' in e for e in graph['comp_edges'])
     assert any('dropped' in w for w in warnings) and any('renamed' in w for w in warnings)
 
@@ -69,7 +68,7 @@ def test_decompose_answer_with_its_own_ids_is_renamed_not_dropped():
              'comp_edges': [['b1', 'r1'], ['c1', 'c2']]}
     graph, _, node_turn, _, warnings = to_graph(value, session, 'decompose')
     nodes = {n['node_id']: n for n in graph['nodes']}
-    assert set(nodes) == {'c1', 'c2', 'c3', 'c4', 'c5', 'e1'}                # r1 -> c5, b1 -> e1, nothing dropped
+    assert set(nodes) == {'c1', 'c2', 'c3', 'c4', 'c5', 'e1'}
     assert sorted(nodes['c5']['depends_on']) == ['c1', 'e1'] and ['e1', 'c5'] in graph['comp_edges']
     assert set(node_turn) == set(nodes) and any('renamed' in w for w in warnings)
 
@@ -110,7 +109,6 @@ def test_heuristics_cover_every_mode():
 
 
 def test_magicbrush_converter_on_synthetic_parquet(tmp_path):
-    """Two-turn session in MagicBrush's parquet layout: alpha-hole mask, then white mask; 4:3 source, square target."""
     import io
     import os
     import subprocess
@@ -129,11 +127,11 @@ def test_magicbrush_converter_on_synthetic_parquet(tmp_path):
     target1 = source.resize((128, 128))
     ImageDraw.Draw(target1).rectangle((70, 70, 110, 110), fill=(255, 0, 0))
     mask1 = target1.convert('RGBA')
-    ImageDraw.Draw(mask1).rectangle((66, 66, 114, 114), fill=(0, 0, 0, 0))  # DALL-E style transparent hole
+    ImageDraw.Draw(mask1).rectangle((66, 66, 114, 114), fill=(0, 0, 0, 0))
     target2 = target1.copy()
     ImageDraw.Draw(target2).ellipse((10, 60, 40, 90), fill=(0, 255, 0))
     mask2 = Image.new('L', (128, 128), 0)
-    ImageDraw.Draw(mask2).rectangle((6, 56, 44, 94), fill=255)  # white = editable
+    ImageDraw.Draw(mask2).rectangle((6, 56, 44, 94), fill=255)
     image_type = pa.struct([('bytes', pa.binary()), ('path', pa.string())])
     table = pa.table({'img_id': ['777', '777'], 'turn_index': pa.array([1, 2], pa.int32()),
                       'source_img': pa.array([png(source), png(target1)], image_type),

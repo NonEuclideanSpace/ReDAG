@@ -22,7 +22,7 @@ def main():
     parser.add_argument('--checkpoint_minutes', type=float, default=20,
                         help='resume checkpoint interval; rerunning the same command continues from the last one')
     args = parser.parse_args()
-    if (Path(args.output) / 'sft_complete.json').exists():  # finished earlier: nothing to load or train
+    if (Path(args.output) / 'sft_complete.json').exists():
         print((Path(args.output) / 'sft_complete.json').read_text())
         return
     records = read_records(args.data)

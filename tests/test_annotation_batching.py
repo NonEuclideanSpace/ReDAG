@@ -1,4 +1,3 @@
-"""Graph annotation keeps generate() batches full and homogeneous, retries inside later batches, splits on OOM."""
 import json
 import sys
 from pathlib import Path
@@ -20,7 +19,7 @@ def test_batches_are_full_homogeneous_and_retries_are_merged(tmp_path, monkeypat
     def fake_generate(planner, conversations, images, max_new_tokens):
         calls['n'] += 1
         if calls['n'] == 1:
-            raise RuntimeError('CUDA out of memory. Tried to allocate 2 GiB')  # first call: split the batch
+            raise RuntimeError('CUDA out of memory. Tried to allocate 2 GiB')
         batches.append([c['id'] for c in conversations])
         return [('bad' if c['id'] == 'c4' or (c['id'] == 'c2' and c['attempt'] == 1) else 'good') for c in conversations]
 
@@ -46,11 +45,11 @@ def test_batches_are_full_homogeneous_and_retries_are_merged(tmp_path, monkeypat
     assert len(rows) == 8 and set(status) == {f'c{i}' for i in range(5)} | {f'm{i}' for i in range(3)}
     assert status['c2'] == 'repaired' and status['c4'] == 'fallback'
     assert all(v == 'ok' for k, v in status.items() if k not in ('c2', 'c4'))
-    for batch in batches:  # never mixes text-only checklist sessions with image (MagicBrush) sessions
+    for batch in batches:
         assert len({b[0] for b in batch}) == 1
-    assert max(len(b) for b in batches if b[0].startswith('c')) == 2  # 4 halved after the out-of-memory error
+    assert max(len(b) for b in batches if b[0].startswith('c')) == 2
     assert max(len(b) for b in batches if b[0].startswith('m')) <= 3
-    assert batches[0][0] == 'c4'  # largest checklist first
+    assert batches[0][0] == 'c4'
 
 
 def test_cut_off_answers_get_a_compact_json_retry_instruction():
@@ -84,7 +83,7 @@ def test_generate_reports_steps_and_answer_lengths(monkeypatch):
             self.generation_config = type('C', (), {'pad_token_id': 0})()
 
         def generate(self, input_ids, attention_mask, max_new_tokens, do_sample):
-            answers = torch.tensor([[7, 7, 7, 0], [8, 8, 8, 8]])  # the second answer hits the limit of 4
+            answers = torch.tensor([[7, 7, 7, 0], [8, 8, 8, 8]])
             return torch.cat([input_ids, answers], dim=1)
 
     planner = type('P', (), {'processor': Processor(), 'model': Model()})()
@@ -109,15 +108,15 @@ def test_grouped_decode_attention_matches_sdpa():
         batch, kv, length, dim = 3, 4, 11, 32
         key, value = torch.randn(batch, kv, length, dim), torch.randn(batch, kv, length, dim)
         mask = torch.ones(batch, 1, 1, length, dtype=torch.bool)
-        mask[0, ..., :4] = False  # left padding of different lengths
+        mask[0, ..., :4] = False
         mask[2, ..., :1] = False
-        query = torch.randn(batch, 1, kv * 6, dim).transpose(1, 2)  # (b, heads, 1, d), not contiguous like the model's
+        query = torch.randn(batch, 1, kv * 6, dim).transpose(1, 2)
         for m in (mask, None, torch.where(mask, 0.0, float('-inf'))):
             ours, _ = attention(module, query, key, value, m, scaling=dim ** -0.5)
             reference, _ = sdpa_attention_forward(module, query, key, value, m, scaling=dim ** -0.5)
             assert ours.shape == reference.shape == (batch, 1, kv * 6, dim)
             assert torch.allclose(ours, reference, atol=1e-5)
-        prefill = torch.randn(batch, kv * 6, 5, dim)  # several query tokens: the original path
+        prefill = torch.randn(batch, kv * 6, 5, dim)
         causal = torch.ones(batch, 1, 5, length, dtype=torch.bool).tril(length - 5)
         assert torch.equal(attention(module, prefill, key, value, causal, scaling=0.1)[0],
                            sdpa_attention_forward(module, prefill, key, value, causal, scaling=0.1)[0])

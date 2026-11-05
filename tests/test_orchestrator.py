@@ -1,4 +1,3 @@
-"""Scheduler tests with fake jobs (standard library only; no torch, no GPUs needed)."""
 import json
 import os
 import signal
@@ -12,7 +11,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts' / 'launch'))
-from orchestrator import Job, Scheduler, choose, lock_held, reservation, simulate  # noqa: E402
+from orchestrator import Job, Scheduler, choose, lock_held, reservation, simulate
 
 PY = sys.executable
 
@@ -30,11 +29,9 @@ def make(tmp_path, jobs, **kwargs):
 
 def test_reservation_and_backfill():
     small, big = Job('small', 'x', gpus=1), Job('big', 'x', gpus=2)
-    # one GPU free, the other busy for one more hour: the 2-GPU job waits, a 30-min job may use the free GPU, a 2-h job may not
     assert reservation(2, 1, [(3600, 1)], 0) == (3600, 0)
     assert choose([(big, 7200, 10), (small, 1800, 5)], 1, [(3600, 1)], 0, 2) == [small]
     assert choose([(big, 7200, 10), (small, 7200, 5)], 1, [(3600, 1)], 0, 2) == []
-    # a more important small job is never held back by the reservation of a less important one
     assert choose([(small, 7200, 20), (big, 7200, 10)], 1, [(3600, 1)], 0, 2) == [small]
     cpu = Job('cpu', 'x')
     assert choose([(cpu, 10, 1), (Job('cpu2', 'x'), 10, 1)], 0, [], 0, 1) == [cpu]
@@ -45,11 +42,11 @@ def test_simulation_packs_gpus():
             Job('d', 'x', gpus=1, hours=0.5, soft=(('c', 0.5),))]
     est = {j.name: j.hours * 3600 for j in jobs}
     two = simulate(jobs, est, 2)
-    assert max(end for _, end in two.values()) == pytest.approx(2.5 * 3600)  # a||b, c, then d (c holds both GPUs)
+    assert max(end for _, end in two.values()) == pytest.approx(2.5 * 3600)
     four = simulate(jobs, est, 4)
-    assert four['d'][0] == pytest.approx(1.5 * 3600)  # starts half way through c on a spare GPU
+    assert four['d'][0] == pytest.approx(1.5 * 3600)
     one = simulate(jobs, est, 1)
-    assert 'c' not in one  # needs two GPUs
+    assert 'c' not in one
 
 
 def test_runs_dag_with_gpu_pinning_and_retry(tmp_path):
@@ -86,7 +83,7 @@ def test_failure_blocks_only_dependents_and_is_not_retried_without_changes(tmp_p
     assert json.loads((runs / 'state' / 'jobs' / 'bad.failed').read_text())['reason'] == 'exit status 3'
     again = make(tmp_path, jobs, code_version='v1')
     assert again.classify()['bad'] == 'failed' and again.classify()['after'] == 'blocked'
-    assert make(tmp_path, jobs, code_version='v2').classify()['bad'] == 'ready'   # code changed: try again
+    assert make(tmp_path, jobs, code_version='v2').classify()['bad'] == 'ready'
     assert make(tmp_path, jobs, code_version='v1', retry_failed=True).classify()['bad'] == 'ready'
 
 
@@ -106,13 +103,13 @@ def test_restarted_scheduler_adopts_running_job(tmp_path):
     deadline = time.time() + 20
     while not (lock.exists() and lock_held(lock)) and time.time() < deadline:
         time.sleep(0.05)
-    first.send_signal(signal.SIGKILL)  # the scheduler dies; the job keeps running in its own session
+    first.send_signal(signal.SIGKILL)
     first.wait()
     assert lock_held(lock)
     jobs = [Job('long', py(job_code), gpus=1), Job('next', py('pass'), gpus=1, deps=('long',))]
     second = make(tmp_path, jobs, gpus=[0])
     assert second.run() == 'complete'
-    assert out.read_text() == 'x'  # adopted, not started twice
+    assert out.read_text() == 'x'
     assert (tmp_path / 'runs' / 'logs' / 'long.log').read_text().count('attempt 1') == 1
 
 
@@ -166,7 +163,6 @@ def test_cpu_only_machine_runs_cpu_jobs_then_stops(tmp_path):
 
 def test_requested_restart_relaunches_without_using_an_attempt(tmp_path):
     count = tmp_path / 'count.txt'
-    # first run: wait to be killed; second run (after the restart): finish
     code = f"""
         import os, time
         path = r'{count}'
@@ -175,7 +171,7 @@ def test_requested_restart_relaunches_without_using_an_attempt(tmp_path):
         if n == 0:
             time.sleep(30)
     """
-    jobs = [Job('job', py(code), gpus=1, attempts=1)]  # one attempt: a counted failure would mark it failed
+    jobs = [Job('job', py(code), gpus=1, attempts=1)]
     scheduler = make(tmp_path, jobs)
     result = {}
     thread = threading.Thread(target=lambda: result.update(outcome=scheduler.run()))
@@ -185,7 +181,7 @@ def test_requested_restart_relaunches_without_using_an_attempt(tmp_path):
     while not (count.exists() and lock_held(state / 'job.lock')) and time.time() < deadline:
         time.sleep(0.05)
     pgid = json.loads((state / 'job.json').read_text())['pgid']
-    (state / 'job.restart').write_text('now\n')  # what `pipeline.py restart job` does
+    (state / 'job.restart').write_text('now\n')
     os.killpg(pgid, signal.SIGTERM)
     thread.join(60)
     assert result['outcome'] == 'complete'

@@ -1,11 +1,3 @@
-"""Validate prepared JSONL files against what scripts/*.py will accept (CPU only, no models).
-
-Uses the repository's own loaders (read_records resolves relative image paths; ConditionDAG /
-preserve_previous_conditions / validate_dataset / ControllerAction) so a file that passes here will
-not fail on schema or K-tier checks after the GPU job has started.
-  python scripts/data/check_data.py                 # every known file present in data/final
-  python scripts/data/check_data.py --images all    # also open every image (slow in no-GPU mode)
-"""
 import argparse
 import json
 import math

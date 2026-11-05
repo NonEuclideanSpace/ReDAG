@@ -1,17 +1,3 @@
-"""The whole ReDAG pipeline as one resumable job graph.  Normally used through scripts/launch/go.sh.
-
-  python scripts/launch/pipeline.py run [--retry-failed] [--only REGEX] [--allow-cpu-phase-on-gpu]
-  python scripts/launch/pipeline.py status [--brief] [--json]
-  python scripts/launch/pipeline.py stop [--drain]
-  python scripts/launch/pipeline.py plan [--gpus N ...] [--from-scratch]
-  python scripts/launch/pipeline.py list | logs JOB [-n N] [-f] | reset JOB... [--dependents]
-  python scripts/launch/pipeline.py bundle export {data,results} [--out DIR] [--with-adapters] [--split 3900]
-  python scripts/launch/pipeline.py bundle import FILE...
-
-Settings come from the environment (scripts/launch/env.sh).  Settings that change results are recorded in
-runs/state/config.json on the first run; a later run with different values is refused (--accept-config-change
-overrides), so a restarted or handed-over run cannot silently mix settings.
-"""
 import argparse
 import hashlib
 import json
@@ -28,12 +14,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import orchestrator as orch  # noqa: E402
-from orchestrator import HOUR, Job, Notifier, Scheduler, lock_held, query_gpus, read_json, simulate  # noqa: E402
+import orchestrator as orch
+from orchestrator import HOUR, Job, Notifier, Scheduler, lock_held, query_gpus, read_json, simulate
 
 ROOT = Path(os.environ.get('REDAG_ROOT', HERE.parents[1]))
 STAGES = ('zero_shot', 'sft', 'ctrl_rl', 'edit_rl', 'alternating_rl')
-# where each experiment-3 stage comes from: (stage file, share of rl_main after which it exists)
 RL_STAGE_SHARE = {'ctrl_rl': 0.25, 'edit_rl': 0.5, 'alternating_rl': 1.0}
 
 
@@ -68,7 +53,6 @@ def settings():
     return s
 
 
-# settings that change what is computed; layouts, shard placement and the experiment selection do not
 RESULT_KEYS = ('PLANNER', 'CONTROLLER', 'EDITOR', 'VERIFIER', 'DETECTOR', 'SAM', 'STEPS_RL', 'STEPS_EVAL', 'MAX_STEPS', 'GEN_BUDGET',
                'VER_BUDGET', 'ROLLOUT_STEPS', 'PER_TIER', 'N_RS_STATES', 'N_RL_TRAIN', 'N_RL_DEV', 'N_EXP2', 'EXP2_MAX_STEPS',
                'CANVAS_SIZE', 'CANVAS_STEPS', 'EDITOR_EPOCHS', 'PLANNER_EPOCHS', 'CONTROLLER_EPOCHS', 'ANNOTATE_SHARDS', 'RS_SHARDS',
@@ -76,7 +60,6 @@ RESULT_KEYS = ('PLANNER', 'CONTROLLER', 'EDITOR', 'VERIFIER', 'DETECTOR', 'SAM',
 
 
 def code_version():
-    """Hash of the code that jobs run (not docs or tests): a change re-runs the GPU preflight and retries failed jobs."""
     digest = hashlib.sha256()
     for path in sorted([*ROOT.glob('redag/**/*.py'), *ROOT.glob('scripts/**/*.py'), *ROOT.glob('scripts/**/*.sh')]):
         if '__pycache__' in path.parts:
@@ -87,15 +70,12 @@ def code_version():
 
 
 def rl_on_one_gpu(s, gpu_info):
-    """RL keeps controller, verifier, grounder and editor together on one GPU when every GPU has >= 90 GiB (estimated
-    peak ~80 GiB: 68.4 GiB of weights plus one trainable LoRA at a time); 80 GB cards use two GPUs per run."""
     if s['RL_LAYOUT'] in ('single', 'split'):
         return s['RL_LAYOUT'] == 'single'
     return bool(gpu_info) and min(g['total'] for g in gpu_info) >= 90 * 1024
 
 
 def environment_version():
-    """Versions of the packages the GPU preflight validates (read from package metadata, no imports)."""
     from importlib import metadata
     versions = []
     for name in ('torch', 'transformers', 'diffusers', 'peft', 'accelerate', 'bitsandbytes', 'flash-linear-attention'):
@@ -119,11 +99,10 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
 
     def add(name, cmd, gpus=0, deps=(), hours=0.05, group='', **extra):
         if gpus and not s['SKIP_PREFLIGHT']:
-            deps = ('preflight', *deps)  # every GPU job waits for the preflight of the current code
+            deps = ('preflight', *deps)
         jobs.append(Job(name, [str(c) for c in cmd] if isinstance(cmd, list) else cmd, gpus=gpus, deps=tuple(deps),
                         hours=hours, group=group, **extra))
 
-    # ---- phase 1: CPU only (AutoDL no-GPU mode); same job names as 01_prepare_data.sh
     g = '1 data (CPU)'
     add('download_models', [py, 'scripts/launch/download_models.py', '--workers', s['DOWNLOAD_WORKERS']], hours=1.0, group=g)
     add('fetch_corebench', [py, f'{D}/fetch_sources.py', '--what', 'corebench'], hours=0.1, group=g)
@@ -136,8 +115,6 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
         add(f'prep_magicbrush_{split}', [py, f'{D}/prep_magicbrush.py', '--splits', split, '--size', 512, '--workers', s['WORKERS']],
             deps=(f'fetch_magicbrush_{split}',), hours=2.0 if split == 'train' else 0.3, group=g)
     canvas = shlex.quote(s['CANVAS_DIR'])
-    # sessions without canvases first (enough for graph annotation, which only reads text), then again with the
-    # CoReBench canvases once that archive is in; ids are identical and build_sets takes canvases from the latter
     add('prep_checklists_text', [py, f'{D}/prep_checklists.py', '--what', 'corebench', 'lgbench', 'longbench'],
         deps=('fetch_corebench', 'fetch_benchmarks'), hours=0.05, group=g)
     add('prep_checklists', f'{shlex.quote(py)} {D}/prep_checklists.py --what corebench lgbench longbench '
@@ -145,28 +122,23 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
         hours=0.1, group=g)
     add('plan_annotation', [py, f'{D}/plan_annotation.py'],
         deps=tuple(f'prep_magicbrush_{x}' for x in s['MB_SPLITS']) + ('prep_checklists',), group=g)
-    # plan_annotation picks each (pool, source) independently, so the checklist benchmarks' ids are final before
-    # MagicBrush is ready: their annotation can start while MagicBrush still downloads
     sessions = 'data/processed/sessions'
     checklists = f'$(ls {sessions}/corebench.jsonl {sessions}/lgbench.jsonl {sessions}/longbench.jsonl 2>/dev/null)'
     add('plan_annotation_checklists', f'{shlex.quote(py)} {D}/plan_annotation.py --sessions {checklists} '
         f'--output {sessions}/annotate_ids_checklists.txt', deps=('prep_checklists_text',), group=g)
     cpu_phase = [j.name for j in jobs]
 
-    # ---- GPU preflight: once per machine and software environment.  Code changes do not re-run it (that would stall every
-    # GPU job for minutes after each fix); they are covered by the unit tests and re-checked with `go.sh preflight`.
     if not s['SKIP_PREFLIGHT']:
         jobs.append(Job('preflight', ['bash', 'scripts/launch/00_check_env.sh'], gpus=1, hours=0.15, group='2 preflight', deps=('download_models',),
                         stamp=f'{environment_version()}|{gpu_signature}', env={'MIN_GPUS': '1'}, attempts=1))
 
-    # ---- phase 2: graph annotation, sets, canvases, state grounding
     g = '3 data (GPU)'
     shards = s['ANNOTATE_SHARDS']
 
     def annotate(files, ids, k):
         return (f'{shlex.quote(py)} {D}/annotate_graphs.py --sessions {files} --ids {ids} --model {shlex.quote(s["PLANNER"])} '
                 f'--device cuda:0 --shard {k} --num_shards {shards} --batch_size {s["ANNOTATE_BATCH"]}')
-    for k in range(shards):  # same shard k in both passes writes the same files, so the second pass skips the first's ids
+    for k in range(shards):
         add(f'annotate_checklists_shard{k}', annotate(checklists, f'{sessions}/annotate_ids_checklists.txt', k),
             gpus=1, deps=('plan_annotation_checklists',), hours=3.6 / shards, group=g, family='annotate')
         add(f'annotate_shard{k}', annotate(f'{sessions}/*.jsonl', f'{sessions}/annotate_ids.txt', k),
@@ -184,7 +156,6 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
                                  '--device', 'cuda:0'], gpus=1, deps=canvases, hours=0.5, group=g)
     add('check_data_phase2', [py, f'{D}/check_data.py'], deps=('precompute_rl_states',), group=g)
 
-    # ---- phase 3: supervised stages and rejection sampling
     g = '4 SFT'
     add('sft_editor', [py, 'scripts/run_sft_editor.py', '--data', data / 'editor_sft_train.jsonl', '--output', sft / 'editor',
                        '--model', s['EDITOR'], '--device', 'cuda:0', '--epochs', s['EDITOR_EPOCHS'], '--checkpoint_minutes', s['CKPT_MINUTES']],
@@ -228,7 +199,6 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
                            '--model', s['CONTROLLER'], '--device', 'cuda:0', '--epochs', s['CONTROLLER_EPOCHS'],
                            '--checkpoint_minutes', s['CKPT_MINUTES']], gpus=1, deps=('check_controller_sft',), hours=2.0, group=g)
 
-    # ---- phase 4: alternating RL (controller + verifier + grounder on one GPU, editor on the other)
     g = '5 RL'
     single = rl_on_one_gpu(s, gpu_info)
     rl_gpus = 1 if single else 2
@@ -247,7 +217,6 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
                 gpus=rl_gpus, deps=trained + ('exp2_subset',), hours=6.0, group=g, family='rl_exp2')
         add('exp2_logs', me + ['_exp2_logs', runs / 'rl' / 'exp2'], deps=tuple(f'rl_exp2_{m}' for m in exp2_modes), group=g)
 
-    # ---- phase 5: experiments 1-3 under one fixed per-session budget
     g = '6 eval'
     split = s['EVAL_LAYOUT'] == 'split'
     eval_gpus = 2 if split else 1
@@ -286,7 +255,6 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
             for k in range(n):
                 name = f'exp3_{stage}_s{k}'
                 parts.append(name)
-                # experiment 1's redag_full sessions are exactly the SFT stage at seed 0 (same weights, data, budget, seed)
                 extra_args = ['--reuse_cases', out / f'exp1.s{k}.cases.jsonl'] if reuse else []
                 add(name, evaluate + budget + ['--exp_id', 3, '--data', data / 'eval_main.jsonl', '--stage_checkpoints', source,
                                                '--stages', stage, *devices, '--shard', k, '--num_shards', n,
@@ -302,7 +270,7 @@ def build_jobs(s, gpu_signature='', gpu_info=None):
     return jobs, cpu_phase
 
 
-GATES = {  # HOLD="exp3 after_rl" in local.env: these jobs wait until `go.sh release <gate>` (HANDOFF.md section 2)
+GATES = {
     'exp3': lambda name: name.startswith('exp3_') and name != 'exp3_stage_file',
     'after_rl': lambda name: name.startswith(('rl_exp2_', 'exp2_eval', 'exp3_ctrl_rl', 'exp3_edit_rl', 'exp3_alternating_rl')),
 }
@@ -326,13 +294,6 @@ def gate_open(runs, gate):
 
 
 class Claims:
-    """SHARED_JOBS: jobs that any of several machines may run; the first machine to claim one runs it.
-
-    A claim is a file runs/state/claims/<job> holding the owner's host name, created atomically (O_EXCL / noclobber)
-    on one machine: CLAIMS_HOST (root@host:port, reached by ssh with the sync key), or this machine when unset.  Each
-    machine therefore needs the claims host reachable; the helper that cannot ssh anywhere holds the claims.  If the
-    claims host stays unreachable for CLAIMS_FALLBACK_MIN minutes, this machine stops honouring remote claims (a job
-    may then run twice, which wastes GPU time but is safe: both copies write the same complete outputs)."""
 
     def __init__(self, runs, host='', key=None, me=None, ttl=45.0, fallback_minutes=15.0, log=print):
         rel = Path(runs).resolve().relative_to(ROOT) if Path(runs).resolve().is_relative_to(ROOT) else Path('runs')
@@ -378,7 +339,6 @@ class Claims:
         return None if self.degraded() else self.owners().get(name)
 
     def claim(self, name):
-        """True if this machine owns the job (claimed now or earlier)."""
         if not self.host:
             self.local.mkdir(parents=True, exist_ok=True)
             try:
@@ -408,10 +368,9 @@ def stage_ready(path, stage):
     return bool(entry) and all((Path(path).parent / p).is_dir() for p in entry.values() if p)
 
 
-# --------------------------------------------------------------------------- helpers run as small CPU jobs
 def helper(argv):
     name, args = argv[0], argv[1:]
-    if name == '_split':  # round-robin parts of a JSONL file (same rule as the old 03_sft.sh)
+    if name == '_split':
         src, parts = Path(args[0]), int(args[1])
         lines = [line for line in src.read_text(encoding='utf-8').splitlines() if line.strip()]
         for k in range(parts):
@@ -433,7 +392,7 @@ def helper(argv):
         modes = ('terminal_broadcast', 'step_full_table', 'subgraph_credit_ours')
         orch.atomic_write(root / 'training_logs.json', json.dumps({m: f'{m}/metrics.jsonl' for m in modes}, indent=2))
         print('wrote', root / 'training_logs.json')
-    elif name == '_stage_file':  # zero-shot and SFT stages of experiment 3, usable before RL starts
+    elif name == '_stage_file':
         dst = Path(args[0])
         dst.parent.mkdir(parents=True, exist_ok=True)
         orch.atomic_write(dst, json.dumps({'zero_shot': {'controller': None, 'editor': None},
@@ -469,9 +428,7 @@ def write_report(s):
     print('\n'.join(lines))
 
 
-# --------------------------------------------------------------------------- guards
 def legacy_scripts():
-    """Old phase scripts (00-05, smoke) still running: they would compete for the same outputs."""
     found = []
     for proc in Path('/proc').glob('[0-9]*'):
         try:
@@ -526,12 +483,11 @@ def start_checks(args, s, jobs, cpu_phase, gpus):
     return problems
 
 
-# --------------------------------------------------------------------------- commands
 def make_scheduler(args, s, quiet=False, gpus=None):
     info = query_gpus()
     signature = f'{len(info)}x' + ','.join(sorted({g["name"] for g in info}))
     jobs, cpu_phase = build_jobs(s, signature, info)
-    if getattr(args, 'only', None):  # the matching jobs and everything they need; the run is complete when those are
+    if getattr(args, 'only', None):
         pattern = re.compile(args.only)
         by_name = {j.name: j for j in jobs}
         keep, todo = set(), [j.name for j in jobs if pattern.search(j.name)]
@@ -547,17 +503,13 @@ def make_scheduler(args, s, quiet=False, gpus=None):
             job.soft = tuple((d, f) for d, f in job.soft if d in keep)
         cpu_phase = [n for n in cpu_phase if n in keep]
     holds = [g for g in env('HOLD', '').replace(',', ' ').split() if g in GATES]
-    for job in jobs:  # decision points: held until a person releases them
+    for job in jobs:
         gates = tuple(g for g in holds if GATES[g](job.name))
         if gates:
             def ready(previous=job.ready, gates=gates):
                 return all(gate_open(s['RUNS'], g) for g in gates) and (previous is None or previous())
             job.ready = ready
             job.waiting_for = f"your decision (go.sh release {' and '.join(gates)})" + (f'; then {job.waiting_for}' if job.waiting_for else '')
-    # Several machines, one pipeline (HANDOFF.md section 4): the same regex is EXTERNAL_JOBS on the main machine and
-    # LOCAL_JOBS on a helper.  External jobs are never started here; their dependents wait until `pipeline.py sync`
-    # brings their outputs and .done marker.  The CPU data phase and the preflight always run on every machine.
-    # SHARED_JOBS run on whichever machine claims them first (class Claims); they ignore EXTERNAL_JOBS / LOCAL_JOBS.
     external, local_only, shared = env('EXTERNAL_JOBS', ''), env('LOCAL_JOBS', ''), env('SHARED_JOBS', '')
     claims = Claims(s['RUNS'], env('CLAIMS_HOST', ''), fallback_minutes=float(env('CLAIMS_FALLBACK_MIN', 15))) if shared else None
     is_shared = lambda name: bool(shared) and name not in cpu_phase and name not in ('preflight', 'download_models') and bool(re.search(shared, name))
@@ -574,8 +526,6 @@ def make_scheduler(args, s, quiet=False, gpus=None):
             job.ready = ready
         elif not per_machine and ((external and re.search(external, job.name)) or (local_only and not re.search(local_only, job.name))):
             job.ready, job.waiting_for = (lambda: False), 'runs on another machine'
-    # NOT_BEFORE='<regex>><job> ...': scheduling order only, e.g. keep long side jobs from taking a GPU that the critical
-    # path needs soon on another machine (the scheduler cannot see the other machine's ETAs)
     for rule in env('NOT_BEFORE', '').replace(';', ' ').split():
         pattern, _, after = rule.rpartition('>')
         for job in jobs:
@@ -644,7 +594,7 @@ def cmd_status(args, s):
     running = scheduler_running(s['RUNS'])
     saved = read_json(Path(s['RUNS']) / 'state' / 'status.json')
     if running and saved and time.time() - saved.get('updated', 0) < 120:
-        status = saved  # the live scheduler's view (it knows progress rates)
+        status = saved
     else:
         scheduler.refresh_gpus()
         scheduler.adopt()
@@ -727,7 +677,7 @@ def cmd_plan(args, s):
 def cmd_stop(args, s):
     state = Path(s['RUNS']) / 'state'
     state.mkdir(parents=True, exist_ok=True)
-    if args.scheduler_only:  # e.g. to load new job definitions: jobs keep running and the next scheduler adopts them
+    if args.scheduler_only:
         pid = int((state / 'scheduler.pid').read_text().strip()) if (state / 'scheduler.pid').exists() else 0
         if pid and scheduler_running(s['RUNS']):
             os.kill(pid, 15)
@@ -744,7 +694,6 @@ def cmd_stop(args, s):
         print('drain requested: running jobs finish, nothing new starts' if args.drain else
               'stop requested: running jobs are terminated and resume from their checkpoints next time')
         return 0
-    # no scheduler: stop orphaned jobs that still hold their locks
     stopped = 0
     for spec_path in (state / 'jobs').glob('*.json'):
         name = spec_path.stem
@@ -780,7 +729,6 @@ def cmd_release(args, s):
 
 
 def cmd_unclaim(args, s):
-    """Hand a shared job back (e.g. the machine that claimed it is gone): the next free machine claims it again."""
     claims = Claims(s['RUNS'], env('CLAIMS_HOST', ''))
     for name in args.jobs:
         print(f'{name}: was claimed by {claims.owners().get(name)}; ' + ('released' if claims.release(name) else 'claims host unreachable'))
@@ -788,8 +736,6 @@ def cmd_unclaim(args, s):
 
 
 def cmd_restart(args, s):
-    """Restart running jobs so that they pick up new code (after git pull).  Resumable jobs continue from their last
-    checkpoint; the restart is not counted as a failed attempt.  The running scheduler starts them again within seconds."""
     jobs = Path(s['RUNS']) / 'state' / 'jobs'
     status = 0
     for name in args.jobs:
@@ -856,9 +802,7 @@ def cmd_reset(args, s):
     return 0
 
 
-# --------------------------------------------------------------------------- bundles (hand-over / backup)
 def referenced_files(final):
-    """Files outside data/final that the final JSONL files point to (images of sessions, states, SFT pairs)."""
     found = set()
 
     def walk(value, base):
@@ -965,10 +909,6 @@ SYNC_EXCLUDE = ('resume/', 'resume.tmp/', 'resume.old/', '*.tmp', '*.incomplete'
 
 
 def rsync(src, dst, ssh, filters, dry=False):
-    # --modify-window=-1: compare modification times to the nanosecond.  With the default (whole seconds) a file that
-    # its writer appended to within the second after the other direction copied it looked equally old but different
-    # in size, so the stale copy replaced it; a writer that keeps the file open (SFT/RL metrics) then wrote into the
-    # replaced inode and its later lines were lost (editor SFT metrics stopped at step 7159 of 8796).
     cmd = ['rsync', '-a', '--update', '--modify-window=-1', '--partial-dir=.rsync-partial', '--timeout=120', '-e', ssh]
     cmd += [f'--exclude={x}' for x in SYNC_EXCLUDE] + filters + [src, dst]
     if dry:
@@ -1013,10 +953,6 @@ def hold_back(names):
 
 
 def cmd_sync(args, s):
-    """Exchange outputs with another machine that runs other jobs of the same pipeline (see EXTERNAL_JOBS).
-
-    Both directions, newest file wins (--update).  Outputs go first and the .done markers / stage files last, so a
-    machine never sees a finished marker before the files behind it."""
     host, _, port = args.peer.partition(':')
     ssh = f'ssh -p {port or 22} -i {args.key} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -o ServerAliveInterval=30'
     remote = f'{host}:{args.remote_root.rstrip("/")}/'
@@ -1080,7 +1016,6 @@ def sha256_file(path):
 
 
 class PartWriter:
-    """File-like sink that splits a stream into numbered parts (netdisk size limits) and hashes each part."""
 
     def __init__(self, path, limit=None):
         self.path, self.limit, self.parts, self.stream, self.index = Path(path), limit, [], None, 0

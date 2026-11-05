@@ -42,7 +42,6 @@ def parse_controller_action(text, node, failure_mode="attribute_error"):
     return ControllerAction(op=op, box=box, instruction=instruction.strip())
 
 
-
 def clean_controller_instruction(text, tokenizer):
     original = text.strip()
     text = original

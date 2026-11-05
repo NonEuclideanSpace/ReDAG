@@ -1,11 +1,10 @@
-"""Health report and decision gates (standard library only)."""
 import argparse
 import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts' / 'launch'))
-import health  # noqa: E402
+import health
 
 
 def write(path, rows):
@@ -21,7 +20,7 @@ def test_health_flags_problems_and_notifies_once(tmp_path):
                                                 dev_acceptance_p=0.2, dev_initial_acceptance_p=0.4, dev_acceptance_gain=-0.2, mean_reward=0.0)
                                            for i in range(10)])
     header = {'fingerprint': {}}
-    def reason(i, mode):  # flat checklist satisfied 2/3 of the time, ReDAG 1/3: the effect is missing
+    def reason(i, mode):
         return 'satisfied' if (i % 3 == 0) == (mode == 'redag_full') else 'step_budget'
     cases = [{'key': f'k{i}', 'case': {'group': f'fixed_weights/{mode}/10', 'execution': {'stop_reason': reason(i, mode)},
                                        'steps': [{'accepted': True}]}} for i, mode in enumerate(['redag_full', 'flat_full'] * 40)]
@@ -33,13 +32,13 @@ def test_health_flags_problems_and_notifies_once(tmp_path):
     notifier = type('N', (), {'send': lambda self, title, text='': sent.append((title, text))})()
     report, worse = health.refresh(root, runs, notifier)
     status = {c['key']: c['status'] for c in report['checks']}
-    assert status['annotation/corebench'] == 'warn'            # 50 % fallback
-    assert status['rl/main'] == 'bad'                          # no updates and falling dev acceptance
-    assert status['rs/acceptance'] == 'bad'                    # 6 / 200 = 3 %
-    assert status['eval/exp1_effect'] == 'warn'                # flat checklist ahead
+    assert status['annotation/corebench'] == 'warn'
+    assert status['rl/main'] == 'bad'
+    assert status['rs/acceptance'] == 'bad'
+    assert status['eval/exp1_effect'] == 'warn'
     assert status['sets'] == 'wait' and (runs / 'HEALTH.md').exists()
     assert len(sent) == 1 and 'rl/main' in sent[0][1]
-    health.refresh(root, runs, notifier)                       # unchanged problems are not sent again
+    health.refresh(root, runs, notifier)
     assert len(sent) == 1
 
 
@@ -89,7 +88,7 @@ def test_gates_hold_jobs_until_released(tmp_path, monkeypatch):
     assert 'go.sh release exp3' in by_name['exp3_zero_shot_s0'].waiting_for
     assert pipeline.cmd_release(argparse.Namespace(gate='exp3'), s) == 0
     assert by_name['exp3_zero_shot_s0'].ready()
-    assert not by_name['exp3_ctrl_rl_s0'].ready()               # also needs after_rl and its checkpoint
+    assert not by_name['exp3_ctrl_rl_s0'].ready()
     assert '--reuse_cases' in by_name['exp3_sft_s3'].cmd and 'exp1_s3' in by_name['exp3_sft_s3'].deps
 
 
@@ -99,7 +98,7 @@ def test_graph_structure_flags_degenerate_sources(tmp_path):
     good = {'nodes': [node('e1', 'entity'), node('q1', 'attribute', ['e1']), node('q2', 'relation', ['e1', 'e2']), node('e2', 'entity'),
                       node('q3', 'attribute', ['q2'])]}
     unlinked = {'nodes': [node('e1', 'entity', scope='global'), node('q1', 'attribute', scope='global'), node('q2', 'relation', scope='global')]}
-    presence = {'nodes': [node('q1', 'entity'), node('q2', 'entity'), node('q3', 'prohibition', scope='global')]}  # flat by nature
+    presence = {'nodes': [node('q1', 'entity'), node('q2', 'entity'), node('q3', 'prohibition', scope='global')]}
     write(tmp_path / 'data/processed/graphs/a.shard0of8.jsonl',
           [{'source': 'a', 'annotation': {'status': 'ok'}, 'graph': good}] * 20 + [{'source': 'a', 'annotation': {'status': 'ok'}, 'graph': presence}] * 20)
     write(tmp_path / 'data/processed/graphs/b.shard0of8.jsonl', [{'source': 'b', 'annotation': {'status': 'ok'}, 'graph': unlinked}] * 30)

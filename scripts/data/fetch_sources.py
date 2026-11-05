@@ -1,16 +1,3 @@
-"""Download raw benchmark sources into data/raw (resumable, low memory).
-
-  MagicBrush      osunlp/MagicBrush (parquet; train ~23.9 GiB, dev ~1.4 GiB, CC-BY-4.0)
-  T2I-CoReBench   lioooox/T2I-CoReBench (12 x 90 prompts with yes/no checklists, Apache-2.0)
-  LGBench         TruemanV5/LGBench (t2i_1000.json, i2i_1000.json, 1000 I2I source images ~1.35 GiB)
-  LongBench-T2I   YCZhou/LongBench-T2I (instruction.jsonl)
-  Files that already exist with the expected size are kept (e.g. copies uploaded by hand).
-
-Examples
-  python scripts/data/fetch_sources.py --what corebench
-  python scripts/data/fetch_sources.py --what magicbrush --splits dev
-  python scripts/data/fetch_sources.py --what magicbrush --splits train --wait_pid 3206   # start after another job ends
-"""
 import argparse
 import json
 import os
@@ -20,7 +7,6 @@ from pathlib import Path
 
 from _common import RAW, log
 
-# env.sh puts every job in offline mode (weights are local); downloading is this script's whole purpose
 for _flag in ('HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE', 'HF_DATASETS_OFFLINE'):
     os.environ.pop(_flag, None)
 os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
@@ -30,7 +16,6 @@ os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '60')
 SOURCES = {
     'magicbrush': ('osunlp/MagicBrush', 'data'),
     'corebench': ('lioooox/T2I-CoReBench', 'splits'),
-    # 4 images per CoReBench prompt from one T2I model; used as zero-shot initial canvases (no GPU rendering)
     'corebench_images': ('lioooox/T2I-CoReBench-Images', ''),
     'lgbench': ('TruemanV5/LGBench', ''),
     'longbench': ('YCZhou/LongBench-T2I', ''),
@@ -41,8 +26,6 @@ KEEP = {'lgbench': lambda f: f.endswith('_1000.json') or f.startswith('i2i_sourc
 
 
 def link_source_folders(target):
-    """i2i_1000.json names its images under a dated folder (e.g. i2i_source_images_20251104_153239/...); the repository
-    stores them under i2i_source_images/, so the dated name becomes a relative symlink."""
     index = target / 'i2i_1000.json'
     if not index.exists():
         return
@@ -61,7 +44,7 @@ def extract_archive(path, target):
     if marker.exists():
         return
     target.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(path, 'r|gz') as archive:  # streaming: constant memory
+    with tarfile.open(path, 'r|gz') as archive:
         archive.extractall(target, filter='data')
     marker.touch()
     log(f'extracted {path.name} -> {target}')
@@ -79,13 +62,13 @@ def listing(repo_id, folder):
         try:
             entries = HfApi().list_repo_tree(repo_id, path_in_repo=folder, repo_type='dataset', recursive=True)
             return [(e.path, getattr(e, 'size', None)) for e in entries if getattr(e, 'size', None) is not None]
-        except Exception as error:  # network hiccups through the mirror are common
+        except Exception as error:
             log(f'listing {repo_id} failed ({error!r}); retry {attempt + 1}/10')
             time.sleep(10 * (attempt + 1))
     raise RuntimeError(f'Could not list {repo_id}')
 
 
-MODELSCOPE = {'magicbrush': 'osunlp/MagicBrush'}  # ModelScope dataset mirrors: much faster than hf-mirror inside China
+MODELSCOPE = {'magicbrush': 'osunlp/MagicBrush'}
 
 
 def modelscope_listing(dataset, root):
@@ -103,7 +86,6 @@ def modelscope_listing(dataset, root):
 
 
 def fetch_modelscope(dataset, filename, size, target):
-    """Resumable download from ModelScope; returns (filename, status) like fetch()."""
     import urllib.request
     path = target / filename
     if path.exists() and (not size or path.stat().st_size == size):
@@ -133,7 +115,7 @@ def fetch_modelscope(dataset, filename, size, target):
     if size and have != size:
         return filename, 'failed'
     if path.exists() and (not size or path.stat().st_size == size):
-        part.unlink(missing_ok=True)  # another downloader finished the same file first
+        part.unlink(missing_ok=True)
     else:
         part.replace(path)
     return filename, 'ok'
@@ -174,7 +156,7 @@ def main():
         target.mkdir(parents=True, exist_ok=True)
         if name == 'corebench_images':
             files = [(f'{model}.tar.gz', None) for model in args.archives]
-        elif name == 'lgbench':  # fixed layout; a recursive listing of 3,000 files pages through huggingface.co itself
+        elif name == 'lgbench':
             files = [('t2i_1000.json', None), ('i2i_1000.json', None)] + [
                 (f'i2i_source_images/task_{i:04d}/{f}', None) for i in range(1000) for f in ('source_image.png', 'metadata.json', 'source_prompt.txt')]
         else:
@@ -190,7 +172,7 @@ def main():
         log(f'{name}: {len(files)} files, {sum(s or 0 for _, s in files) / 2**30:.2f} GiB from {repo_id}')
         results, mirror = {}, MODELSCOPE.get(name)
 
-        def get(filename, size):  # ModelScope first where a mirror exists, then hf-mirror
+        def get(filename, size):
             if mirror:
                 got = fetch_modelscope(mirror, filename, size, target)
                 if got[1] != 'failed':

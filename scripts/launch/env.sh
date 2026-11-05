@@ -1,10 +1,6 @@
-# Shared settings for every ReDAG job.  Usage:  source scripts/launch/env.sh
-# Override any variable before sourcing, e.g.  N_RL_TRAIN=64 source scripts/launch/env.sh
 set -o pipefail
 
 export REDAG_ROOT=${REDAG_ROOT:-/root/autodl-tmp/ReDAG}
-# machine-local settings that should survive restarts and stay out of git (NOTIFY_URL, AUTO_SHUTDOWN, knobs, ...)
-# shellcheck disable=SC1091
 [ -f "$REDAG_ROOT/local.env" ] && set -a && . "$REDAG_ROOT/local.env" && set +a
 export MODELS=${MODELS:-/root/autodl-tmp/models}
 export HF_HOME=${HF_HOME:-/root/autodl-tmp/hf_cache}
@@ -25,7 +21,6 @@ export RUNS=${RUNS:-$REDAG_ROOT/runs}
 export LOGS=$RUNS/logs
 mkdir -p "$LOGS"
 
-# ---- budget knobs (see scripts/launch/README.md for the GPU-hour table) ----
 export STEPS_RL=${STEPS_RL:-16}          # Flow-SDE steps for RL rollouts (replay dt follows automatically)
 export STEPS_EVAL=${STEPS_EVAL:-28}      # steps for rejection sampling and every evaluation
 export MAX_STEPS=${MAX_STEPS:-4}         # repair steps per turn (identical for all compared methods)
@@ -38,8 +33,6 @@ RUNTIME="--controller_model $CONTROLLER --editor_model $EDITOR --verifier_model 
 --detector_model $DETECTOR --sam_model $SAM --planner_model $PLANNER"
 export RUNTIME
 
-# run_job NAME COMMAND...  -> log to runs/logs/NAME.log, skip when runs/logs/NAME.done exists.  The job lock is the
-# one the scheduler (pipeline.py) uses, so the same job never runs twice at once.
 run_job() {
     local name=$1; shift
     if [ -f "$LOGS/$name.done" ]; then echo "[skip] $name (delete $LOGS/$name.done to rerun)"; return 0; fi
@@ -57,7 +50,6 @@ run_job() {
     touch "$LOGS/$name.done"; echo "[done] $name in ${spent}s"
 }
 
-# wait_all: wait for background jobs and fail if any failed
 wait_all() { local rc=0; for pid in $(jobs -p); do wait "$pid" || rc=1; done; return $rc; }
 
 require_gpus() {

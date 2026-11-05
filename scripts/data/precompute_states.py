@@ -1,11 +1,3 @@
-"""Ground and score failure states once (verifier + grounder only; no controller/editor needed).
-
-state_from_record() re-runs ReDAGHarness.initialize() (full grounding + K verifier calls) every time a
-record without cached scores is used: every RL epoch, every stage and every development evaluation.
-This writes the grounded graph (boxes), scores and detected_counts back into the file so that work is
-done exactly once; states whose active frontier is empty are dropped (nothing left to repair).
-  python scripts/data/precompute_states.py --files data/final/rl_train.jsonl data/final/rl_dev.jsonl --device cuda:0
-"""
 import argparse
 import json
 import shutil
@@ -55,7 +47,7 @@ def main():
                        protected=len(state.protected_set))
             kept.append(row)
             if index % 20 == 0:
-                write_jsonl(path, kept + rows[index:])  # checkpoint progress
+                write_jsonl(path, kept + rows[index:])
                 log(f'{path.name}: {index}/{len(rows)} grounded, {dropped} dropped (already satisfied)')
         write_jsonl(path, kept)
         log(f'{path.name}: kept {len(kept)}, dropped {dropped}; original saved as {backup.name}')

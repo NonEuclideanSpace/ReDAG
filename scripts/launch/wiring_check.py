@@ -1,12 +1,3 @@
-"""CPU wiring check with tiny random models built from the real configs, tokenizers and processors.
-
-Catches API mismatches (transformers / diffusers / peft versions, chat templates, LoRA target names,
-VAE latent layout, generation kwargs) before any GPU hour is spent.  Every model keeps its real
-architecture and vocabulary but has a few tiny layers, so the whole check fits in ~1.5 GB of RAM:
-  python scripts/launch/wiring_check.py                         # build tiny models + run every section
-  python scripts/launch/wiring_check.py --only editor controller
-Sections: controller planner verifier editor grounder loops (training/RL/eval loops with all tiny parts).
-"""
 import argparse
 import json
 import shutil
@@ -18,11 +9,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'scripts'))
-import torch  # noqa: E402
+import torch
 
 MODELS = Path('/root/autodl-tmp/models')
 RESULTS = {}
-LIGHT = {'on': False, 'dtype': torch.float32, 'device': 'cpu'}  # --light: bf16 Qwen models, forward-only SFT checks, no reload (fits 1.3 GB RSS)
+LIGHT = {'on': False, 'dtype': torch.float32, 'device': 'cpu'}
 
 
 def copy_files(src, dst, names):
@@ -41,7 +32,7 @@ def tiny_qwen35(src, dst):
                 layer_types=['linear_attention'] * 3 + ['full_attention'], full_attention_interval=4, mtp_num_hidden_layers=0)
     for key in ('rope_parameters', 'rope_scaling'):
         if isinstance(text.get(key), dict) and 'mrope_section' in text[key]:
-            text[key]['mrope_section'] = [2, 1, 1]  # partial_rotary 0.25 * head_dim 32 = 8 -> 4 pairs
+            text[key]['mrope_section'] = [2, 1, 1]
     vision.update(depth=1, hidden_size=32, intermediate_size=64, num_heads=2, out_hidden_size=64, deepstack_visual_indexes=[])
     dst.mkdir(parents=True, exist_ok=True)
     (dst / 'config.json').write_text(json.dumps(config))
@@ -96,7 +87,7 @@ def section(name):
             try:
                 detail = func(*args)
                 RESULTS[name] = {'ok': True, 'seconds': round(time.time() - started, 1), 'detail': detail}
-            except Exception as error:  # report every failure, keep going
+            except Exception as error:
                 RESULTS[name] = {'ok': False, 'seconds': round(time.time() - started, 1), 'error': repr(error)[:600],
                                  'trace': traceback.format_exc()[-2500:]}
             print(name, json.dumps(RESULTS[name])[:1500], flush=True)
@@ -114,7 +105,7 @@ def graph():
     return dag_from_dict({'nodes': [
         {'node_id': 'cup', 'node_type': 'entity', 'question': 'Is there a cup?', 'entity_phrase': 'cup', 'scope': 'local'},
         {'node_id': 'red', 'node_type': 'attribute', 'question': 'Is the cup red?', 'entity_phrase': 'cup', 'scope': 'local',
-         'depends_on': ['cup'], 'threshold': 0.99},  # random tiny weights never reach 0.99: a repair target always exists
+         'depends_on': ['cup'], 'threshold': 0.99},
         {'node_id': 'style', 'node_type': 'background', 'question': 'Is it a watercolor painting?', 'entity_phrase': '',
          'scope': 'global'}], 'comp_edges': [['cup', 'red']]})
 
@@ -161,7 +152,7 @@ def check_controller(path):
               'image': canvas(), 'scores': state.scores, 'target_node_id': 'red',
               'action': {'op': 'modify_attr', 'box': [0.1, 0.1, 0.6, 0.6], 'instruction': 'Make the cup red.'}}
     controller.model.zero_grad(set_to_none=True)
-    if LIGHT['on']:  # 150 x 248k-vocab logits do not fit next to the model in 2 GiB; build the SFT prompt only
+    if LIGHT['on']:
         from redag.models.controller import bounded_instruction
         text, count, _ = bounded_instruction(record['action']['instruction'], controller.processor.tokenizer)
         inputs = controller.encode(controller.messages(state, dag, 'red'))
@@ -206,7 +197,7 @@ def check_verifier(path):
     from redag.verify.verifier import TwoStageVerifier, load_vlm_scorer
     scorer = load_vlm_scorer(str(path), LIGHT['device'], LIGHT['dtype'])
     value = scorer(canvas(), 'Is there a cup?')
-    small = scorer(canvas(20, 9), 'Is the cup red?')  # tiny crops must still be accepted by the processor
+    small = scorer(canvas(20, 9), 'Is the cup red?')
     verifier = TwoStageVerifier(scorer)
     scores = verifier.verify_subgraph_after_edit(canvas(), graph(), {'cup': 0.0, 'red': 0.0, 'style': 0.0}, {'cup', 'red', 'style'})
     assert 0 <= value <= 1 and 0 <= small <= 1 and set(scores) == {'cup', 'red', 'style'}
@@ -224,14 +215,14 @@ def check_editor(path):
     kinds = lora_kinds(editor.transformer)
     assert kinds, 'no LoRA modules were created in the transformer'
     image = canvas()
-    action = ControllerAction('modify_attr', (0.11, 0.23, 0.57, 0.81), 'Make the cup red.')  # 43 x 58 px: not a multiple of 16
+    action = ControllerAction('modify_attr', (0.11, 0.23, 0.57, 0.81), 'Make the cup red.')
     conditioning = editor.prepare(image, action)
     trajectory = editor.sample(image, action, seed=5, conditioning=conditioning)
     crop = trajectory['edited_crop']
     expected = editor._crop(image, action).shape
     assert tuple(crop.shape) == tuple(expected), (crop.shape, expected)
     rendered = editor.render(image, action, seed=5)
-    assert torch.allclose(rendered.cpu().float(), crop.cpu().float(), atol=1e-3)  # render() returns on the image's device
+    assert torch.allclose(rendered.cpu().float(), crop.cpu().float(), atol=1e-3)
     editor.train()
     loss, metrics = compute_editor_rl_loss(editor.dit_model, [trajectory], **conditioning, advantages=torch.tensor([0.7], device=editor.device),
                                            lora_params_current=editor.lora_parameters(),
@@ -245,7 +236,7 @@ def check_editor(path):
     sft = compute_editor_masked_flow_sft_loss(editor.dit_model, **prepared, alpha_mask=3.0)
     sft.backward()
     grads = sum(float(p.grad.abs().sum()) for p in editor.lora_parameters() if p.grad is not None)
-    if not LIGHT['on']:  # the render_canvases.py call; needs more than the 2 GiB of no-GPU mode
+    if not LIGHT['on']:
         generators = [torch.Generator(device=LIGHT['device']).manual_seed(i) for i in range(2)]
         images = editor.pipeline(prompt=['a red cup', 'a blue ball'], height=64, width=64, num_inference_steps=2,
                                  guidance_scale=4.0, generator=generators).images
@@ -261,7 +252,6 @@ def check_editor(path):
 
 @section('grounder')
 def check_grounder(_):
-    """Processor contracts of GroundingDINO and SAM2 with the real processor files (no weights loaded)."""
     import numpy as np
     from PIL import Image
     from transformers import AutoProcessor, Sam2Processor
@@ -285,7 +275,6 @@ def check_grounder(_):
 
 @section('loops')
 def check_loops(paths):
-    """SFT, rejection sampling, alternating RL and an evaluation session with every tiny component together."""
     from types import SimpleNamespace
     from redag.harness.environment import ReDAGHarness, run_record
     from redag.learn.rl_trainer import train_alternating
@@ -324,7 +313,7 @@ def check_loops(paths):
     editor.num_steps = 6
     rs = collect_controller_rs(read_records(work / 'states.jsonl'), harness, controller, editor, work / 'rs.jsonl')
     sft_rows = read_records(work / 'rs.jsonl') if (work / 'rs.jsonl').stat().st_size else []
-    if not sft_rows:  # random weights rarely produce an accepted edit; exercise the controller trainer anyway
+    if not sft_rows:
         sft_rows = [dict(rows[0], image=str(work / 'img0.png'), scores={'cup': 0.9, 'red': 0.1, 'style': 0.9}, target_node_id='red',
                          action={'op': 'modify_attr', 'box': [0.1, 0.1, 0.7, 0.7], 'instruction': 'Make the cup red.'})]
     sft_controller = train_sft(controller, sft_rows, work / 'sft_controller', 'controller')
